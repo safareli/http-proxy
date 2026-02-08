@@ -9,6 +9,7 @@ export interface SecretConfig {
 
 export interface HostConfig {
   secrets: SecretConfig[];
+  graphqlEndpoints?: string[];
 }
 
 export interface ProxyConfig {
@@ -37,6 +38,15 @@ export function getConfig(): ProxyConfig {
 export function getRequestKey(method: string, path: string): string {
   const pathWithoutQuery = path.split("?")[0];
   return `${method} ${pathWithoutQuery}`;
+}
+
+export function isGraphQLEndpoint(host: string, path: string): boolean {
+  const hostConfig = config[host];
+  if (!hostConfig?.graphqlEndpoints) {
+    return false;
+  }
+  const pathWithoutQuery = path.split("?")[0] ?? path;
+  return hostConfig.graphqlEndpoints.includes(pathWithoutQuery);
 }
 
 export function hasGrant(secretC: SecretConfig, requestKey: string): boolean {

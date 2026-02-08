@@ -8,8 +8,15 @@ import {
   getRealSecret,
   findSecretConfigFromHeaders,
   substituteSecretInHeaders,
+  isGraphQLEndpoint,
   type SecretConfig,
 } from "./config";
+import {
+  parseGraphQLRequest,
+  parseGraphQLFromSearchParams,
+  getGraphQLRequestKey,
+  type GraphQLOperation,
+} from "./graphql";
 
 export type ApprovalResponse =
   | "allow-once"
@@ -73,6 +80,20 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
   }
 
   const path = req.url.pathname + req.url.search;
+
+  // Check if this is a GraphQL endpoint
+  if (isGraphQLEndpoint(req.url.host, req.url.pathname)) {
+    return handleGraphQLRequest(req, secretConfig, path);
+  }
+
+  return handleHttpRequest(req, secretConfig, path);
+}
+
+async function handleHttpRequest(
+  req: RequestLoaded,
+  secretConfig: SecretConfig,
+  path: string,
+): Promise<Response> {
   const requestKey = getRequestKey(req.method, path);
 
   if (hasGrant(secretConfig, requestKey)) {
@@ -114,6 +135,117 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
       case "reject-forever":
         console.log(`  → Rejected forever`);
         await addRejection(secretConfig, requestKey);
+        return new Response("Forbidden - Request permanently rejected", {
+          status: 403,
+        });
+    }
+  } catch (error) {
+    console.log(`  → Approval timeout or error: ${error}`);
+    return new Response("Forbidden - Approval timeout", { status: 403 });
+  }
+}
+
+async function handleGraphQLRequest(
+  req: RequestLoaded,
+  secretConfig: SecretConfig,
+  path: string,
+): Promise<Response> {
+  // Parse GraphQL operations
+  let operations: GraphQLOperation[] | null = null;
+
+  if (req.method === "GET") {
+    operations = parseGraphQLFromSearchParams(req.url.searchParams);
+  } else if (req.body) {
+    const bodyStr = new TextDecoder().decode(req.body);
+    operations = parseGraphQLRequest(bodyStr);
+  }
+
+  // If we can't parse GraphQL, reject the request
+  if (!operations || operations.length === 0) {
+    console.log(`  → Could not parse GraphQL request body`);
+    return new Response("Bad Request - Invalid GraphQL request", {
+      status: 400,
+    });
+  }
+
+  // Generate request keys for each operation
+  const operationKeys = operations.map((op) => ({
+    operation: op,
+    key: getGraphQLRequestKey(op),
+  }));
+
+  console.log(
+    `  → GraphQL operations: ${operationKeys.map((ok) => ok.key).join(", ")}`,
+  );
+
+  // Check for rejections first - if any operation is rejected, reject the whole request
+  for (const { key } of operationKeys) {
+    if (hasRejection(secretConfig, key)) {
+      console.log(`  → Permanent rejection exists for ${key}`);
+      return new Response("Forbidden - Request permanently rejected", {
+        status: 403,
+      });
+    }
+  }
+
+  // Find operations that need approval (not already granted)
+  const needsApproval = operationKeys.filter(
+    ({ key }) => !hasGrant(secretConfig, key),
+  );
+
+  // If all operations are granted, forward the request
+  if (needsApproval.length === 0) {
+    console.log(`  → All GraphQL operations are granted`);
+    return forwardRequestWithSecretSubstitution(req, secretConfig);
+  }
+
+  // Log which operations are already granted
+  const alreadyGranted = operationKeys.filter(({ key }) =>
+    hasGrant(secretConfig, key),
+  );
+  for (const { key } of alreadyGranted) {
+    console.log(`  → Permanent grant exists for ${key}`);
+  }
+
+  if (!requestApprovalFn) {
+    console.log(`  → No approval handler configured, rejecting`);
+    return new Response("Forbidden - No approval handler", { status: 403 });
+  }
+
+  // Request approval for operations that need it
+  const keysNeedingApproval = needsApproval.map(({ key }) => key).join(", ");
+  console.log(`  → Requesting approval for: ${keysNeedingApproval}`);
+
+  try {
+    const approval = await requestApprovalFn(
+      req.url.host,
+      "GRAPHQL",
+      keysNeedingApproval,
+    );
+
+    switch (approval) {
+      case "allow-once":
+        console.log(`  → Approved once`);
+        return forwardRequestWithSecretSubstitution(req, secretConfig);
+
+      case "allow-forever":
+        console.log(`  → Approved forever`);
+        // Add grant for each operation that needed approval
+        for (const { key } of needsApproval) {
+          await addGrant(secretConfig, key);
+        }
+        return forwardRequestWithSecretSubstitution(req, secretConfig);
+
+      case "reject-once":
+        console.log(`  → Rejected once`);
+        return new Response("Forbidden - Request rejected", { status: 403 });
+
+      case "reject-forever":
+        console.log(`  → Rejected forever`);
+        // Add rejection for each operation that needed approval
+        for (const { key } of needsApproval) {
+          await addRejection(secretConfig, key);
+        }
         return new Response("Forbidden - Request permanently rejected", {
           status: 403,
         });

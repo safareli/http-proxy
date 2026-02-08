@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "grammy": "^1.39.3"
+    "grammy": "^1.39.3",
+    "graphql": "^16.12.0"
   }
 }
