@@ -100,7 +100,9 @@ function parseGraphQLQuery(query: string): GraphQLOperation[] | null {
  * Extract top-level field names from a selection set.
  * Returns null if unsupported selection types are encountered.
  */
-function extractTopLevelFields(selectionSet: SelectionSetNode): string[] | null {
+function extractTopLevelFields(
+  selectionSet: SelectionSetNode,
+): string[] | null {
   const fields: string[] = [];
 
   for (const selection of selectionSet.selections) {

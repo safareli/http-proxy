@@ -15,6 +15,7 @@ import {
   parseGraphQLRequest,
   parseGraphQLFromSearchParams,
   getGraphQLRequestKey,
+  getGraphQLOperationDescription,
   type GraphQLOperation,
 } from "./graphql";
 
@@ -168,10 +169,11 @@ async function handleGraphQLRequest(
     });
   }
 
-  // Generate request keys for each operation
+  // Generate request keys and descriptions for each operation
   const operationKeys = operations.map((op) => ({
     operation: op,
     key: getGraphQLRequestKey(op),
+    description: getGraphQLOperationDescription(op),
   }));
 
   console.log(
@@ -213,14 +215,16 @@ async function handleGraphQLRequest(
   }
 
   // Request approval for operations that need it
-  const keysNeedingApproval = needsApproval.map(({ key }) => key).join(", ");
-  console.log(`  → Requesting approval for: ${keysNeedingApproval}`);
+  const descriptionsNeedingApproval = needsApproval
+    .map(({ description }) => description)
+    .join(", ");
+  console.log(`  → Requesting approval for: ${descriptionsNeedingApproval}`);
 
   try {
     const approval = await requestApprovalFn(
       req.url.host,
       "GRAPHQL",
-      keysNeedingApproval,
+      descriptionsNeedingApproval,
     );
 
     switch (approval) {
@@ -258,11 +262,13 @@ async function handleGraphQLRequest(
 
 async function forwardRequest(req: RequestLoaded): Promise<Response> {
   try {
-    return await fetch(req.url, {
+    const response = await fetch(req.url, {
       method: req.method,
       headers: req.headers,
       body: req.body,
+      decompress: false,
     });
+    return response;
   } catch (error) {
     console.error(`  → Error forwarding request: ${error}`);
     return new Response(`Bad Gateway: ${error}`, { status: 502 });
@@ -284,7 +290,7 @@ async function forwardRequestWithSecretSubstitution(
   }
 
   try {
-    return await fetch(req.url, {
+    const response = await fetch(req.url, {
       method: req.method,
       headers: substituteSecretInHeaders(
         req.headers,
@@ -292,7 +298,9 @@ async function forwardRequestWithSecretSubstitution(
         realSecret,
       ),
       body: req.body,
+      decompress: false,
     });
+    return response;
   } catch (error) {
     console.error(`  → Error forwarding request: ${error}`);
     return new Response(`Bad Gateway: ${error}`, { status: 502 });
