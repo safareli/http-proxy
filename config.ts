@@ -1,10 +1,14 @@
 const CONFIG_FILE = "./proxy-config.json";
 
-export interface HostConfig {
+export interface SecretConfig {
   secret: string;
   secretEnvVarName: string;
   grants: string[];
   rejections: string[];
+}
+
+export interface HostConfig {
+  secrets: SecretConfig[];
 }
 
 export interface ProxyConfig {
@@ -35,74 +39,60 @@ export function getRequestKey(method: string, path: string): string {
   return `${method} ${pathWithoutQuery}`;
 }
 
-export function hasGrant(host: string, requestKey: string): boolean {
-  const hostConfig = config[host];
-  if (!hostConfig) {
-    return false;
-  }
-  return hostConfig.grants.includes(requestKey);
+export function hasGrant(secretC: SecretConfig, requestKey: string): boolean {
+  return secretC.grants.includes(requestKey);
 }
 
-export function hasRejection(host: string, requestKey: string): boolean {
-  const hostConfig = config[host];
-  if (!hostConfig) {
-    return false;
-  }
-  return hostConfig.rejections.includes(requestKey);
+export function hasRejection(
+  secretC: SecretConfig,
+  requestKey: string,
+): boolean {
+  return secretC.rejections.includes(requestKey);
 }
 
 export async function addGrant(
-  host: string,
+  secretC: SecretConfig,
   requestKey: string,
 ): Promise<void> {
-  const hostConfig = config[host];
-  if (!hostConfig) {
+  if (secretC.grants.includes(requestKey)) {
     return;
   }
-  if (!hostConfig.grants.includes(requestKey)) {
-    hostConfig.grants.push(requestKey);
-    await saveConfig();
-  }
+  secretC.grants.push(requestKey);
+  await saveConfig();
 }
 
 export async function addRejection(
-  host: string,
+  secretC: SecretConfig,
   requestKey: string,
 ): Promise<void> {
-  const hostConfig = config[host];
-  if (!hostConfig) {
+  if (secretC.rejections.includes(requestKey)) {
     return;
   }
-  if (!hostConfig.rejections.includes(requestKey)) {
-    hostConfig.rejections.push(requestKey);
-    await saveConfig();
-  }
+  secretC.rejections.push(requestKey);
+  await saveConfig();
 }
 
-export function getRealSecret(host: string): string | undefined {
-  const hostConfig = config[host];
-  if (!hostConfig) {
-    return undefined;
-  }
-  return process.env[hostConfig.secretEnvVarName];
+export function getRealSecret(secretC: SecretConfig): string | undefined {
+  return process.env[secretC.secretEnvVarName];
 }
 
-export function findSecretInHeaders(req: { headers: Headers; url: URL }): {
-  found: boolean;
-  fakeSecret?: string;
-} {
+export function findSecretConfigFromHeaders(req: {
+  headers: Headers;
+  url: URL;
+}): SecretConfig | null {
   const hostConfig = config[req.url.host];
   if (!hostConfig) {
-    return { found: false };
+    return null;
   }
 
-  const fakeSecret = hostConfig.secret;
-  for (const [, value] of req.headers) {
-    if (value.includes(fakeSecret)) {
-      return { found: true, fakeSecret };
+  for (const secretC of hostConfig.secrets) {
+    for (const [, value] of req.headers) {
+      if (value.includes(secretC.secret)) {
+        return secretC;
+      }
     }
   }
-  return { found: false };
+  return null;
 }
 
 export function substituteSecretInHeaders(

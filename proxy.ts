@@ -6,8 +6,9 @@ import {
   addGrant,
   addRejection,
   getRealSecret,
-  findSecretInHeaders,
+  findSecretConfigFromHeaders,
   substituteSecretInHeaders,
+  type SecretConfig,
 } from "./config";
 
 export type ApprovalResponse =
@@ -65,21 +66,21 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
     console.log(`  body: ${new TextDecoder().decode(req.body)}`);
   }
 
-  const { found: secretFound, fakeSecret } = findSecretInHeaders(req);
+  const secretConfig = findSecretConfigFromHeaders(req);
 
-  if (!secretFound) {
+  if (!secretConfig) {
     return forwardRequest(req);
   }
 
   const path = req.url.pathname + req.url.search;
   const requestKey = getRequestKey(req.method, path);
 
-  if (hasGrant(req.url.host, requestKey)) {
+  if (hasGrant(secretConfig, requestKey)) {
     console.log(`  → Permanent grant exists for ${requestKey}`);
-    return forwardRequestWithSecretSubstitution(req, fakeSecret!);
+    return forwardRequestWithSecretSubstitution(req, secretConfig);
   }
 
-  if (hasRejection(req.url.host, requestKey)) {
+  if (hasRejection(secretConfig, requestKey)) {
     console.log(`  → Permanent rejection exists for ${requestKey}`);
     return new Response("Forbidden - Request permanently rejected", {
       status: 403,
@@ -99,12 +100,12 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
     switch (approval) {
       case "allow-once":
         console.log(`  → Approved once`);
-        return forwardRequestWithSecretSubstitution(req, fakeSecret!);
+        return forwardRequestWithSecretSubstitution(req, secretConfig);
 
       case "allow-forever":
         console.log(`  → Approved forever`);
-        await addGrant(req.url.host, requestKey);
-        return forwardRequestWithSecretSubstitution(req, fakeSecret!);
+        await addGrant(secretConfig, requestKey);
+        return forwardRequestWithSecretSubstitution(req, secretConfig);
 
       case "reject-once":
         console.log(`  → Rejected once`);
@@ -112,7 +113,7 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
 
       case "reject-forever":
         console.log(`  → Rejected forever`);
-        await addRejection(req.url.host, requestKey);
+        await addRejection(secretConfig, requestKey);
         return new Response("Forbidden - Request permanently rejected", {
           status: 403,
         });
@@ -138,11 +139,13 @@ async function forwardRequest(req: RequestLoaded): Promise<Response> {
 
 async function forwardRequestWithSecretSubstitution(
   req: RequestLoaded,
-  fakeSecret: string,
+  secretConfig: SecretConfig,
 ): Promise<Response> {
-  const realSecret = getRealSecret(req.url.host);
+  const realSecret = getRealSecret(secretConfig);
   if (!realSecret) {
-    console.error(`  → No real secret configured for ${req.url.host}`);
+    console.error(
+      `  → No real secret configured for ${req.url.host}: ${secretConfig.secretEnvVarName}`,
+    );
     return new Response("Internal Server Error - No real secret configured", {
       status: 500,
     });
@@ -151,7 +154,11 @@ async function forwardRequestWithSecretSubstitution(
   try {
     return await fetch(req.url, {
       method: req.method,
-      headers: substituteSecretInHeaders(req.headers, fakeSecret, realSecret),
+      headers: substituteSecretInHeaders(
+        req.headers,
+        secretConfig.secret,
+        realSecret,
+      ),
       body: req.body,
     });
   } catch (error) {
