@@ -1,0 +1,10 @@
+{
+  "api.github.com": {
+    "secret": "github_pat_XXXXXXXXXXXXXXXXXXXXXX_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "secretEnvVarName": "GH_TOKEN",
+    "grants": [
+      "GET /repos/my_org/my_repo/actions/runs"
+    ],
+    "rejections": []
+  }
+}
