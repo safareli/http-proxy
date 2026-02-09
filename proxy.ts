@@ -2,8 +2,8 @@ import {
   loadConfig,
   getConfig,
   getRequestKey,
-  hasGrant,
-  hasRejection,
+  findMatchingGrant,
+  findMatchingRejection,
   addGrant,
   addRejection,
   getRealSecret,
@@ -65,7 +65,7 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
   const req = await loadRequest(reqOriginal);
 
   console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.url.host}${req.url.pathname}`,
+    `\n[${new Date().toISOString()}] ${req.method} ${req.url.host}${req.url.pathname}`,
   );
 
   for (const [key, value] of req.url.searchParams) {
@@ -105,16 +105,20 @@ async function handleHttpRequest(
 ): Promise<Response> {
   const requestKey = getRequestKey(req.method, path);
 
-  if (hasGrant(secretConfig, requestKey)) {
-    console.log(`  → Permanent grant exists for ${requestKey}`);
-    return forwardRequestWithSecretSubstitution(req, secretConfig);
-  }
-
-  if (hasRejection(secretConfig, requestKey)) {
-    console.log(`  → Permanent rejection exists for ${requestKey}`);
+  const matchingRejection = findMatchingRejection(secretConfig, requestKey);
+  if (matchingRejection) {
+    console.log(
+      `  → Permanent rejection exists for pattern: ${matchingRejection}`,
+    );
     return new Response("Forbidden - Request permanently rejected", {
       status: 403,
     });
+  }
+
+  const matchingGrant = findMatchingGrant(secretConfig, requestKey);
+  if (matchingGrant) {
+    console.log(`  → Permanent grant exists for pattern: ${matchingGrant}`);
+    return forwardRequestWithSecretSubstitution(req, secretConfig);
   }
 
   if (!requestApprovalFn) {
@@ -190,18 +194,29 @@ async function handleGraphQLRequest(
 
   // Check for rejections first - if any operation is rejected, reject the whole request
   for (const { key } of operationKeys) {
-    if (hasRejection(secretConfig, key)) {
-      console.log(`  → Permanent rejection exists for ${key}`);
+    const matchingRejection = findMatchingRejection(secretConfig, key);
+    if (matchingRejection) {
+      console.log(
+        `  → Permanent rejection exists for pattern: ${matchingRejection}`,
+      );
       return new Response("Forbidden - Request permanently rejected", {
         status: 403,
       });
     }
   }
 
-  // Find operations that need approval (not already granted)
-  const needsApproval = operationKeys.filter(
-    ({ key }) => !hasGrant(secretConfig, key),
-  );
+  // Check which operations are already granted vs need approval
+  const grantedPatterns: string[] = [];
+  const needsApproval: typeof operationKeys = [];
+
+  for (const opKey of operationKeys) {
+    const matchingGrant = findMatchingGrant(secretConfig, opKey.key);
+    if (matchingGrant) {
+      grantedPatterns.push(matchingGrant);
+    } else {
+      needsApproval.push(opKey);
+    }
+  }
 
   // If all operations are granted, forward the request
   if (needsApproval.length === 0) {
@@ -210,11 +225,8 @@ async function handleGraphQLRequest(
   }
 
   // Log which operations are already granted
-  const alreadyGranted = operationKeys.filter(({ key }) =>
-    hasGrant(secretConfig, key),
-  );
-  for (const { key } of alreadyGranted) {
-    console.log(`  → Permanent grant exists for ${key}`);
+  for (const pattern of grantedPatterns) {
+    console.log(`  → Permanent grant exists for pattern: ${pattern}`);
   }
 
   if (!requestApprovalFn) {

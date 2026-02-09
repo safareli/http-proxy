@@ -95,16 +95,23 @@ export function matchesPattern(pattern: string, requestKey: string): boolean {
   return glob.match(requestRest);
 }
 
-export function hasGrant(secretC: SecretConfig, requestKey: string): boolean {
-  return secretC.grants.some((pattern) => matchesPattern(pattern, requestKey));
-}
-
-export function hasRejection(
+export function findMatchingGrant(
   secretC: SecretConfig,
   requestKey: string,
-): boolean {
-  return secretC.rejections.some((pattern) =>
-    matchesPattern(pattern, requestKey),
+): string | null {
+  return (
+    secretC.grants.find((pattern) => matchesPattern(pattern, requestKey)) ??
+    null
+  );
+}
+
+export function findMatchingRejection(
+  secretC: SecretConfig,
+  requestKey: string,
+): string | null {
+  return (
+    secretC.rejections.find((pattern) => matchesPattern(pattern, requestKey)) ??
+    null
   );
 }
 
