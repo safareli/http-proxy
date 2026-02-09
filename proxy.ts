@@ -16,9 +16,9 @@ import { ensureAllDomainCerts } from "./certs";
 import {
   parseGraphQLRequest,
   parseGraphQLFromSearchParams,
-  getGraphQLRequestKey,
-  getGraphQLOperationDescription,
-  type GraphQLOperation,
+  getGraphQLRequestKeys,
+  getGraphQLDescription,
+  type ParsedGraphQLRequest,
 } from "./graphql";
 
 export type ApprovalResponse =
@@ -163,37 +163,30 @@ async function handleGraphQLRequest(
   secretConfig: SecretConfig,
   path: string,
 ): Promise<Response> {
-  // Parse GraphQL operations
-  let operations: GraphQLOperation[] | null = null;
+  // Parse GraphQL request
+  let parsed: ParsedGraphQLRequest | null = null;
 
   if (req.method === "GET") {
-    operations = parseGraphQLFromSearchParams(req.url.searchParams);
+    parsed = parseGraphQLFromSearchParams(req.url.searchParams);
   } else if (req.body) {
     const bodyStr = new TextDecoder().decode(req.body);
-    operations = parseGraphQLRequest(bodyStr);
+    parsed = parseGraphQLRequest(bodyStr);
   }
 
   // If we can't parse GraphQL, reject the request
-  if (!operations || operations.length === 0) {
+  if (!parsed) {
     console.log(`  → Could not parse GraphQL request body`);
     return new Response("Bad Request - Invalid GraphQL request", {
       status: 400,
     });
   }
 
-  // Generate request keys and descriptions for each operation
-  const operationKeys = operations.map((op) => ({
-    operation: op,
-    key: getGraphQLRequestKey(op),
-    description: getGraphQLOperationDescription(op),
-  }));
+  const keys = getGraphQLRequestKeys(parsed);
 
-  console.log(
-    `  → GraphQL operations: ${operationKeys.map((ok) => ok.key).join(", ")}`,
-  );
+  console.log(`  → GraphQL: ${getGraphQLDescription(parsed)}`);
 
-  // Check for rejections first - if any operation is rejected, reject the whole request
-  for (const { key } of operationKeys) {
+  // Check for rejections first
+  for (const key of keys) {
     const matchingRejection = findMatchingRejection(secretConfig, key);
     if (matchingRejection) {
       console.log(
@@ -205,16 +198,16 @@ async function handleGraphQLRequest(
     }
   }
 
-  // Check which operations are already granted vs need approval
+  // Check which keys are already granted vs need approval
   const grantedPatterns: string[] = [];
-  const needsApproval: typeof operationKeys = [];
+  const needsApproval: string[] = [];
 
-  for (const opKey of operationKeys) {
-    const matchingGrant = findMatchingGrant(secretConfig, opKey.key);
+  for (const key of keys) {
+    const matchingGrant = findMatchingGrant(secretConfig, key);
     if (matchingGrant) {
       grantedPatterns.push(matchingGrant);
     } else {
-      needsApproval.push(opKey);
+      needsApproval.push(key);
     }
   }
 
@@ -234,17 +227,17 @@ async function handleGraphQLRequest(
     return new Response("Forbidden - No approval handler", { status: 403 });
   }
 
-  // Request approval for operations that need it
-  const descriptionsNeedingApproval = needsApproval
-    .map(({ description }) => description)
-    .join(", ");
-  console.log(`  → Requesting approval for: ${descriptionsNeedingApproval}`);
+  // Build description for approval request
+  const approvalDescription = needsApproval
+    .map((key) => key.replace("GRAPHQL ", ""))
+    .join("; ");
+  console.log(`  → Requesting approval for: ${approvalDescription}`);
 
   try {
     const approval = await requestApprovalFn(
       req.url.host,
       "GRAPHQL",
-      descriptionsNeedingApproval,
+      approvalDescription,
     );
 
     switch (approval) {
@@ -254,8 +247,8 @@ async function handleGraphQLRequest(
 
       case "allow-forever":
         console.log(`  → Approved forever`);
-        // Add grant for each operation that needed approval
-        for (const { key } of needsApproval) {
+        // Add grant for each key that needed approval
+        for (const key of needsApproval) {
           await addGrant(secretConfig, key);
         }
         return forwardRequestWithSecretSubstitution(req, secretConfig);
@@ -266,8 +259,8 @@ async function handleGraphQLRequest(
 
       case "reject-forever":
         console.log(`  → Rejected forever`);
-        // Add rejection for each operation that needed approval
-        for (const { key } of needsApproval) {
+        // Add rejection for each key that needed approval
+        for (const key of needsApproval) {
           await addRejection(secretConfig, key);
         }
         return new Response("Forbidden - Request permanently rejected", {

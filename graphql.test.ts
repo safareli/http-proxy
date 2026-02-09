@@ -1,0 +1,573 @@
+import { test, expect, describe } from "bun:test";
+import {
+  parseGraphQLRequest,
+  getGraphQLRequestKeys,
+  getGraphQLDescription,
+  parseGraphQLFromSearchParams,
+} from "./graphql";
+
+describe("parseGraphQLRequest", () => {
+  test("parses simple query without fragments", () => {
+    const body = JSON.stringify({
+      query: `query GetUser { user { id name } }`,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("parses query with named fragment", () => {
+    const body = JSON.stringify({
+      query: `
+        fragment UserFields on User {
+          id
+          name
+          email
+        }
+        query GetUser {
+          user {
+            ...UserFields
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("parses query with multiple top-level fields", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetRepo {
+          viewer { login }
+          repository(owner: "foo", name: "bar") {
+            id
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["viewer", 'repository(owner: "foo", name: "bar")'],
+      mutations: [],
+    });
+  });
+
+  test("parses query with nested fragments", () => {
+    const body = JSON.stringify({
+      query: `
+        fragment OwnerFields on Owner {
+          login
+        }
+        fragment RepoFields on Repository {
+          id
+          name
+          owner {
+            ...OwnerFields
+          }
+        }
+        query GetRepo {
+          repository(owner: "foo", name: "bar") {
+            ...RepoFields
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ['repository(owner: "foo", name: "bar")'],
+      mutations: [],
+    });
+  });
+
+  test("parses query with inline fragment", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetNode {
+          node(id: "123") {
+            ... on User {
+              name
+            }
+            ... on Repository {
+              description
+            }
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ['node(id: "123")'],
+      mutations: [],
+    });
+  });
+
+  test("parses mutation with arguments", () => {
+    const body = JSON.stringify({
+      query: `
+        mutation CreateRepo {
+          createRepository(input: { name: "my-repo", visibility: PRIVATE }) {
+            repository {
+              id
+            }
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: [],
+      mutations: ['createRepository(input: {name: "my-repo", visibility: PRIVATE})'],
+    });
+  });
+
+  test("parses mutation with variable arguments - substitutes variables", () => {
+    const body = JSON.stringify({
+      query: `
+        mutation CreateRepo($input: CreateRepositoryInput!) {
+          createRepository(input: $input) {
+            repository {
+              id
+            }
+          }
+        }
+      `,
+      variables: { input: { name: "my-repo", visibility: "PRIVATE" } },
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: [],
+      mutations: ['createRepository(input: {name: "my-repo", visibility: "PRIVATE"})'],
+    });
+  });
+
+  test("keeps variable reference when variable not provided", () => {
+    const body = JSON.stringify({
+      query: `
+        mutation CreateRepo($input: CreateRepositoryInput!) {
+          createRepository(input: $input) {
+            repository {
+              id
+            }
+          }
+        }
+      `,
+      // No variables provided
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: [],
+      mutations: ["createRepository(input: $input)"],
+    });
+  });
+
+  test("parses mutation without arguments", () => {
+    const body = JSON.stringify({
+      query: `
+        mutation {
+          logout {
+            success
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: [],
+      mutations: ["logout"],
+    });
+  });
+
+  test("parses batched requests", () => {
+    const body = JSON.stringify([
+      {
+        query: `query Q1 { user { id } }`,
+      },
+      {
+        query: `query Q2 { posts { title } }`,
+      },
+    ]);
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user", "posts"],
+      mutations: [],
+    });
+  });
+
+  test("parses batched requests with mixed operations", () => {
+    const body = JSON.stringify([
+      {
+        query: `query { user { id } }`,
+      },
+      {
+        query: `mutation { deleteUser(id: "123") { success } }`,
+      },
+    ]);
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: ['deleteUser(id: "123")'],
+    });
+  });
+
+  test("deduplicates fields across batched requests", () => {
+    const body = JSON.stringify([
+      {
+        query: `query { user { id } }`,
+      },
+      {
+        query: `query { user { name } posts { title } }`,
+      },
+    ]);
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user", "posts"],
+      mutations: [],
+    });
+  });
+
+  test("filters by operationName when provided", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetUser { user { id } }
+        query GetPosts { posts { title } }
+      `,
+      operationName: "GetUser",
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("filters by operationName in batched requests", () => {
+    const body = JSON.stringify([
+      {
+        query: `
+          query GetUser { user { id } }
+          query GetPosts { posts { title } }
+        `,
+        operationName: "GetUser",
+      },
+      {
+        query: `
+          mutation CreatePost { createPost(title: "Hi") { id } }
+          mutation DeletePost { deletePost(id: "1") { success } }
+        `,
+        operationName: "CreatePost",
+      },
+    ]);
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: ['createPost(title: "Hi")'],
+    });
+  });
+
+  test("returns null for unknown operationName", () => {
+    const body = JSON.stringify({
+      query: `query GetUser { user { id } }`,
+      operationName: "NonExistent",
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null for unknown fragment reference", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetUser {
+          user {
+            ...UnknownFragment
+          }
+        }
+      `,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toBeNull();
+  });
+
+  test("returns null for invalid JSON", () => {
+    const result = parseGraphQLRequest("not json");
+    expect(result).toBeNull();
+  });
+
+  test("returns null for invalid GraphQL syntax", () => {
+    const body = JSON.stringify({
+      query: "not valid graphql {{{",
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toBeNull();
+  });
+
+  test("parses anonymous query", () => {
+    const body = JSON.stringify({
+      query: `{ user { id } }`,
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("substitutes variables in query arguments", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetRepo($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            id
+          }
+        }
+      `,
+      variables: { owner: "archetype-labs", name: "app" },
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ['repository(owner: "archetype-labs", name: "app")'],
+      mutations: [],
+    });
+  });
+
+  test("handles mixed literal and variable arguments", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetRepo($name: String!) {
+          repository(owner: "archetype-labs", name: $name) {
+            id
+          }
+        }
+      `,
+      variables: { name: "app" },
+    });
+
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ['repository(owner: "archetype-labs", name: "app")'],
+      mutations: [],
+    });
+  });
+
+  test("handles document with both query and mutation", () => {
+    const body = JSON.stringify({
+      query: `
+        query GetUser { user { id } }
+        mutation UpdateUser { updateUser(name: "Bob") { id } }
+      `,
+    });
+
+    // Without operationName, all operations are processed
+    const result = parseGraphQLRequest(body);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: ['updateUser(name: "Bob")'],
+    });
+  });
+});
+
+describe("getGraphQLRequestKeys", () => {
+  test("returns individual keys for each query field", () => {
+    const keys = getGraphQLRequestKeys({
+      queries: ["user", "posts"],
+      mutations: [],
+    });
+
+    expect(keys).toEqual([
+      "GRAPHQL query user",
+      "GRAPHQL query posts",
+    ]);
+  });
+
+  test("returns individual keys for each mutation field", () => {
+    const keys = getGraphQLRequestKeys({
+      queries: [],
+      mutations: ['createUser(name: "Bob")', "logout"],
+    });
+
+    expect(keys).toEqual([
+      'GRAPHQL mutation createUser(name: "Bob")',
+      "GRAPHQL mutation logout",
+    ]);
+  });
+
+  test("returns keys for both queries and mutations", () => {
+    const keys = getGraphQLRequestKeys({
+      queries: ["user"],
+      mutations: ['updateUser(id: "1")'],
+    });
+
+    expect(keys).toEqual([
+      "GRAPHQL query user",
+      'GRAPHQL mutation updateUser(id: "1")',
+    ]);
+  });
+
+  test("returns empty array when no fields", () => {
+    const keys = getGraphQLRequestKeys({
+      queries: [],
+      mutations: [],
+    });
+
+    expect(keys).toEqual([]);
+  });
+});
+
+describe("getGraphQLDescription", () => {
+  test("returns query description", () => {
+    const desc = getGraphQLDescription({
+      queries: ["user", "posts"],
+      mutations: [],
+    });
+
+    expect(desc).toBe("query { user, posts }");
+  });
+
+  test("returns mutation description", () => {
+    const desc = getGraphQLDescription({
+      queries: [],
+      mutations: ["createUser(name: \"Bob\")"],
+    });
+
+    expect(desc).toBe('mutation { createUser(name: "Bob") }');
+  });
+
+  test("returns combined description", () => {
+    const desc = getGraphQLDescription({
+      queries: ["user"],
+      mutations: ["updateUser(id: \"1\")"],
+    });
+
+    expect(desc).toBe('query { user }; mutation { updateUser(id: "1") }');
+  });
+});
+
+describe("parseGraphQLFromSearchParams", () => {
+  test("parses query from search params", () => {
+    const params = new URLSearchParams();
+    params.set("query", "query GetUser { user { id } }");
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("parses query with fragments from search params", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "query",
+      `
+      fragment F on User { id name }
+      query GetUser { user { ...F } }
+    `,
+    );
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toEqual({
+      queries: ["user"],
+      mutations: [],
+    });
+  });
+
+  test("respects operationName from search params", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "query",
+      `
+      query GetUser { user { id } }
+      query GetPosts { posts { title } }
+    `,
+    );
+    params.set("operationName", "GetPosts");
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toEqual({
+      queries: ["posts"],
+      mutations: [],
+    });
+  });
+
+  test("returns null when query param missing", () => {
+    const params = new URLSearchParams();
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toBeNull();
+  });
+
+  test("substitutes variables from search params", () => {
+    const params = new URLSearchParams();
+    params.set(
+      "query",
+      `query GetRepo($owner: String!) { repository(owner: $owner) { id } }`,
+    );
+    params.set("variables", JSON.stringify({ owner: "archetype-labs" }));
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toEqual({
+      queries: ['repository(owner: "archetype-labs")'],
+      mutations: [],
+    });
+  });
+
+  test("returns null for invalid variables JSON in search params", () => {
+    const params = new URLSearchParams();
+    params.set("query", "query { user { id } }");
+    params.set("variables", "not valid json");
+
+    const result = parseGraphQLFromSearchParams(params);
+
+    expect(result).toBeNull();
+  });
+});
