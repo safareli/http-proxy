@@ -72,14 +72,20 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
     console.log(`  ? ${key}=${value}`);
   }
 
-  if (req.body != null && req.body.byteLength > 0) {
-    console.log(`  body: ${new TextDecoder().decode(req.body)}`);
-  }
+  // console.log(" HEADERS");
+  // for (const [key, value] of req.headers) {
+  //   console.log(`    ${key}=${value}`);
+  // }
 
   const secretConfig = findSecretConfigFromHeaders(req);
 
   if (!secretConfig) {
+    console.log(`  → Request without secrets forwarding`);
     return forwardRequest(req);
+  }
+
+  if (req.body != null && req.body.byteLength > 0) {
+    console.log(`  body: ${new TextDecoder().decode(req.body)}`);
   }
 
   const path = req.url.pathname + req.url.search;
