@@ -1,5 +1,9 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { startProxy, setRequestApprovalHandler, type ApprovalResponse } from "./proxy";
+import {
+  startProxy,
+  setRequestApprovalHandler,
+  type ApprovalResponse,
+} from "./proxy";
 
 const token = process.env.TELEGRAM_API_TOKEN;
 if (!token) {
@@ -34,7 +38,9 @@ bot.use((ctx, next) => {
   return next();
 });
 
-bot.command("start", (ctx) => ctx.reply("Welcome! I'm monitoring proxy requests."));
+bot.command("start", (ctx) =>
+  ctx.reply("Welcome! I'm monitoring proxy requests."),
+);
 
 bot.command("help", (ctx) =>
   ctx.reply(
@@ -53,7 +59,9 @@ bot.callbackQuery(/^approve:(.+):(.+)$/, async (ctx) => {
 
   const pending = pendingRequests.get(requestId);
   if (!pending) {
-    await ctx.answerCallbackQuery({ text: "Request expired or already handled" });
+    await ctx.answerCallbackQuery({
+      text: "Request expired or already handled",
+    });
     return;
   }
 
@@ -107,12 +115,10 @@ function requestApproval(
       .text("✗ Once", `approve:${requestId}:reject-once`)
       .text("✗ Forever", `approve:${requestId}:reject-forever`);
 
-    const displayPath = path.length > 100 ? path.substring(0, 100) + "..." : path;
-
     bot.api
       .sendMessage(
         Number(ownerId),
-        `🔒 Approval needed:\n\n${method} ${host}${displayPath}`,
+        `🔒 Approval needed:\n\n${method} ${host}${path}`,
         { reply_markup: keyboard },
       )
       .catch((err) => {
