@@ -49,15 +49,63 @@ export function isGraphQLEndpoint(host: string, path: string): boolean {
   return hostConfig.graphqlEndpoints.includes(pathWithoutQuery);
 }
 
+export function matchesPattern(pattern: string, requestKey: string): boolean {
+  // Exact match fast path
+  if (pattern === requestKey) {
+    return true;
+  }
+
+  const patternSpaceIdx = pattern.indexOf(" ");
+  const requestSpaceIdx = requestKey.indexOf(" ");
+
+  if (patternSpaceIdx === -1 || requestSpaceIdx === -1) {
+    return false;
+  }
+
+  const patternMethod = pattern.slice(0, patternSpaceIdx);
+  const requestMethod = requestKey.slice(0, requestSpaceIdx);
+
+  if (patternMethod !== requestMethod) {
+    return false;
+  }
+
+  const patternRest = pattern.slice(patternSpaceIdx + 1);
+  const requestRest = requestKey.slice(requestSpaceIdx + 1);
+
+  // Handle "METHOD *" - matches everything
+  if (patternRest === "*") {
+    return true;
+  }
+
+  // Handle GraphQL: "GRAPHQL query *" or "GRAPHQL mutation *"
+  if (patternMethod === "GRAPHQL") {
+    if (patternRest === "query *") {
+      return requestRest.startsWith("query ");
+    }
+    if (patternRest === "mutation *") {
+      return requestRest.startsWith("mutation ");
+    }
+    // Exact match only for other GraphQL patterns
+    return patternRest === requestRest;
+  }
+
+  // Handle HTTP path patterns with * wildcards using Bun's Glob
+  // * matches a single path segment (anything except /)
+  const glob = new Bun.Glob(patternRest);
+  return glob.match(requestRest);
+}
+
 export function hasGrant(secretC: SecretConfig, requestKey: string): boolean {
-  return secretC.grants.includes(requestKey);
+  return secretC.grants.some((pattern) => matchesPattern(pattern, requestKey));
 }
 
 export function hasRejection(
   secretC: SecretConfig,
   requestKey: string,
 ): boolean {
-  return secretC.rejections.includes(requestKey);
+  return secretC.rejections.some((pattern) =>
+    matchesPattern(pattern, requestKey),
+  );
 }
 
 export async function addGrant(
