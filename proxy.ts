@@ -1,5 +1,6 @@
 import {
   loadConfig,
+  getConfig,
   getRequestKey,
   hasGrant,
   hasRejection,
@@ -11,6 +12,7 @@ import {
   isGraphQLEndpoint,
   type SecretConfig,
 } from "./config";
+import { ensureAllDomainCerts } from "./certs";
 import {
   parseGraphQLRequest,
   parseGraphQLFromSearchParams,
@@ -310,13 +312,23 @@ async function forwardRequestWithSecretSubstitution(
 export async function startProxy(): Promise<void> {
   await loadConfig();
 
-  const certFile = Bun.file("./certs/server.crt");
-  const keyFile = Bun.file("./certs/server.key");
+  const config = getConfig();
+  const domains = Object.keys(config);
 
-  if (!(await certFile.exists()) || !(await keyFile.exists())) {
-    console.error("Certificates not found. Run: bun run generate-certs.ts");
+  if (domains.length === 0) {
+    console.error("No domains configured in proxy-config.json");
     process.exit(1);
   }
+
+  console.log(`Ensuring certificates for domains: ${domains.join(", ")}`);
+  const domainCerts = await ensureAllDomainCerts(domains);
+
+  // Build TLS array with serverName for each domain (SNI)
+  const tlsConfigs = Object.entries(domainCerts).map(([domain, cert]) => ({
+    serverName: domain,
+    cert: cert.cert,
+    key: cert.key,
+  }));
 
   const httpServer = Bun.serve({
     port: 80,
@@ -327,13 +339,11 @@ export async function startProxy(): Promise<void> {
   const httpsServer = Bun.serve({
     port: 443,
     idleTimeout: 255,
-    tls: {
-      cert: certFile,
-      key: keyFile,
-    },
+    tls: tlsConfigs,
     fetch: handleRequest,
   });
 
   console.log(`HTTP proxy listening on port ${httpServer.port}`);
   console.log(`HTTPS proxy listening on port ${httpsServer.port}`);
+  console.log(`Serving TLS for: ${domains.join(", ")}`);
 }

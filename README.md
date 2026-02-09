@@ -10,7 +10,7 @@ HTTPS MITM proxy with Telegram approval flow. Intercepts requests, detects secre
 bun install
 ```
 
-### 2. Generate certificates
+### 2. Generate CA certificate
 
 ```bash
 bun run generate-certs.ts
@@ -18,8 +18,8 @@ bun run generate-certs.ts
 
 This creates:
 - `certs/ca.crt` - CA certificate (install this in your VM/system)
-- `certs/server.crt` - Server certificate
-- `certs/server.key` - Server private key
+
+Per-domain certificates are generated automatically when the proxy starts, based on hosts in `proxy-config.json`. They are stored in `certs/domains/`.
 
 ### 3. Install CA certificate in your VM
 
@@ -66,6 +66,8 @@ Edit `proxy-config.json` to add hosts you want to intercept:
 - `secretEnvVarName`: Environment variable containing the real token
 - `grants`: Permanently allowed requests (e.g., `["GET /user", "POST /repos"]`)
 - `rejections`: Permanently blocked requests
+
+When you add a new host, just restart the proxy - certificates are generated automatically.
 
 ### 6. Configure DNS in Colima
 
