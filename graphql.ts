@@ -5,6 +5,7 @@ import {
   type SelectionSetNode,
   type SelectionNode,
   type FragmentDefinitionNode,
+  type FieldNode,
   type ValueNode,
   Kind,
 } from "graphql";
@@ -443,4 +444,93 @@ export function parseGraphQLFromSearchParams(
   }
 
   return parseGraphQLDocument(query, operationName, variables);
+}
+
+/**
+ * Parse a single GraphQL field string like "createPullRequest(input: $ANY)"
+ * by wrapping it in a minimal document: "{ fieldStr }".
+ */
+function parseFieldString(fieldStr: string): FieldNode | null {
+  try {
+    const doc = parse(`{ ${fieldStr} }`);
+    const op = doc.definitions[0];
+    if (!op || op.kind !== Kind.OPERATION_DEFINITION) return null;
+    const field = op.selectionSet.selections[0];
+    if (!field || field.kind !== Kind.FIELD) return null;
+    return field;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Match two ValueNode ASTs. A $ANY variable in the pattern acts as a wildcard
+ * that matches any value in the request. Other variable names are not allowed.
+ */
+function matchValueNode(pattern: ValueNode, request: ValueNode): boolean {
+  if (pattern.kind === Kind.VARIABLE) {
+    if (pattern.name.value !== "ANY") {
+      throw new Error(`Unknown variable $${pattern.name.value} in grant/rejection pattern. Only $ANY is supported.`);
+    }
+    return true;
+  }
+  if (pattern.kind !== request.kind) return false;
+
+  switch (pattern.kind) {
+    case Kind.NULL:
+      return true;
+    case Kind.INT:
+    case Kind.FLOAT:
+    case Kind.STRING:
+    case Kind.BOOLEAN:
+    case Kind.ENUM:
+      return (pattern as { readonly value: unknown }).value ===
+        (request as { readonly value: unknown }).value;
+    case Kind.LIST: {
+      const rList = request as typeof pattern;
+      if (pattern.values.length !== rList.values.length) return false;
+      return pattern.values.every((pv, i) => matchValueNode(pv, rList.values[i]));
+    }
+    case Kind.OBJECT: {
+      const rObj = request as typeof pattern;
+      if (pattern.fields.length !== rObj.fields.length) return false;
+      for (const pField of pattern.fields) {
+        const rField = rObj.fields.find(f => f.name.value === pField.name.value);
+        if (!rField) return false;
+        if (!matchValueNode(pField.value, rField.value)) return false;
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Match a GraphQL field pattern string against a request field string.
+ * Pattern may contain $ANY references that act as wildcards.
+ *
+ * e.g. pattern "createPullRequest(input: $ANY)" matches
+ *      request "createPullRequest(input: {title: \"foo\", body: \"bar\"})"
+ */
+export function matchesGraphQLFieldPattern(
+  patternFieldStr: string,
+  requestFieldStr: string,
+): boolean {
+  const patternNode = parseFieldString(patternFieldStr);
+  const requestNode = parseFieldString(requestFieldStr);
+  if (!patternNode || !requestNode) return false;
+  if (patternNode.name.value !== requestNode.name.value) return false;
+
+  const patternArgs = patternNode.arguments ?? [];
+  const requestArgs = requestNode.arguments ?? [];
+  if (patternArgs.length !== requestArgs.length) return false;
+
+  for (const pArg of patternArgs) {
+    const rArg = requestArgs.find(a => a.name.value === pArg.name.value);
+    if (!rArg) return false;
+    if (!matchValueNode(pArg.value, rArg.value)) return false;
+  }
+
+  return true;
 }

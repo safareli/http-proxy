@@ -49,5 +49,101 @@ describe("matchesPattern", () => {
       expect(matchesPattern("GRAPHQL mutation *", "GRAPHQL mutation DeleteUser")).toBe(true);
       expect(matchesPattern("GRAPHQL mutation *", "GRAPHQL query GetUser")).toBe(false);
     });
+
+    test("exact match with args", () => {
+      expect(matchesPattern(
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"})',
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"})',
+      )).toBe(true);
+      expect(matchesPattern(
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"})',
+        'GRAPHQL mutation createPullRequest(input: {title: "bar"})',
+      )).toBe(false);
+    });
+
+    test("$variable wildcard matches any scalar value", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createUser(name: $ANY)",
+        'GRAPHQL mutation createUser(name: "Alice")',
+      )).toBe(true);
+      expect(matchesPattern(
+        "GRAPHQL mutation createUser(name: $ANY)",
+        'GRAPHQL mutation createUser(name: "Bob")',
+      )).toBe(true);
+    });
+
+    test("$variable wildcard matches any object value", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createPullRequest(input: $ANY)",
+        'GRAPHQL mutation createPullRequest(input: {title: "foo", body: "bar", headRefName: "branch"})',
+      )).toBe(true);
+    });
+
+    test("$variable wildcard matches any list value", () => {
+      expect(matchesPattern(
+        "GRAPHQL query getUsers(ids: $ANY)",
+        'GRAPHQL query getUsers(ids: [1, 2, 3])',
+      )).toBe(true);
+    });
+
+    test("$variable wildcard in nested object", () => {
+      expect(matchesPattern(
+        'GRAPHQL mutation createPullRequest(input: {branch: "main", title: $ANY})',
+        'GRAPHQL mutation createPullRequest(input: {branch: "main", title: "my PR"})',
+      )).toBe(true);
+      expect(matchesPattern(
+        'GRAPHQL mutation createPullRequest(input: {branch: "main", title: $ANY})',
+        'GRAPHQL mutation createPullRequest(input: {branch: "develop", title: "my PR"})',
+      )).toBe(false);
+    });
+
+    test("multiple $ANY wildcards", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createPullRequest(input: $ANY, dryRun: $ANY)",
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"}, dryRun: true)',
+      )).toBe(true);
+    });
+
+    test("unknown variable throws", () => {
+      expect(() => matchesPattern(
+        "GRAPHQL mutation createUser(name: $FOO)",
+        'GRAPHQL mutation createUser(name: "Alice")',
+      )).toThrow("Unknown variable $FOO in grant/rejection pattern. Only $ANY is supported.");
+    });
+
+    test("field name mismatch with $variable", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createPullRequest(input: $ANY)",
+        'GRAPHQL mutation deletePullRequest(input: {id: "123"})',
+      )).toBe(false);
+    });
+
+    test("arg count mismatch", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createPullRequest(input: $ANY)",
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"}, dryRun: true)',
+      )).toBe(false);
+    });
+
+    test("arg name mismatch", () => {
+      expect(matchesPattern(
+        "GRAPHQL mutation createPullRequest(data: $ANY)",
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"})',
+      )).toBe(false);
+    });
+
+    test("operation type mismatch with $variable", () => {
+      expect(matchesPattern(
+        "GRAPHQL query createPullRequest(input: $ANY)",
+        'GRAPHQL mutation createPullRequest(input: {title: "foo"})',
+      )).toBe(false);
+    });
+
+    test("no-arg pattern does not match request with args", () => {
+      expect(matchesPattern(
+        "GRAPHQL query viewer",
+        "GRAPHQL query viewer(id: 1)",
+      )).toBe(false);
+    });
   });
 });

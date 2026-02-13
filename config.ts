@@ -2,6 +2,7 @@ import {
   loadOpenApiSpec,
   type OpenApiSpecConfig,
 } from "./openapi";
+import { matchesGraphQLFieldPattern } from "./graphql";
 
 const CONFIG_FILE = "./proxy-config.json";
 
@@ -98,8 +99,18 @@ export function matchesPattern(pattern: string, requestKey: string): boolean {
     if (patternRest === "mutation *") {
       return requestRest.startsWith("mutation ");
     }
-    // Exact match only for other GraphQL patterns
-    return patternRest === requestRest;
+    // Split "query fieldName(args)" into op type + field string
+    const patternOpIdx = patternRest.indexOf(" ");
+    const requestOpIdx = requestRest.indexOf(" ");
+    if (patternOpIdx === -1 || requestOpIdx === -1) return false;
+
+    if (patternRest.slice(0, patternOpIdx) !== requestRest.slice(0, requestOpIdx)) {
+      return false;
+    }
+    return matchesGraphQLFieldPattern(
+      patternRest.slice(patternOpIdx + 1),
+      requestRest.slice(requestOpIdx + 1),
+    );
   }
 
   // Handle HTTP path patterns with * wildcards using Bun's Glob
