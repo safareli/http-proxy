@@ -36,3 +36,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Generated certificates
 certs/
 proxy-config.json
+
+# OpenAPI spec cache
+.openapi-cache/

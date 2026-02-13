@@ -1,3 +1,8 @@
+import {
+  loadOpenApiSpec,
+  type OpenApiSpecConfig,
+} from "./openapi";
+
 const CONFIG_FILE = "./proxy-config.json";
 
 export interface SecretConfig {
@@ -10,6 +15,7 @@ export interface SecretConfig {
 export interface HostConfig {
   secrets: SecretConfig[];
   graphqlEndpoints?: string[];
+  openApiSpec?: OpenApiSpecConfig;
 }
 
 export interface ProxyConfig {
@@ -24,6 +30,13 @@ export async function loadConfig(): Promise<void> {
     config = await file.json();
   } else {
     config = {};
+  }
+
+  // Load OpenAPI specs for all configured hosts
+  for (const [host, hostConfig] of Object.entries(config)) {
+    if (hostConfig.openApiSpec) {
+      await loadOpenApiSpec(host, hostConfig.openApiSpec);
+    }
   }
 }
 

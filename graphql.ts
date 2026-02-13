@@ -4,22 +4,41 @@ import {
   type OperationDefinitionNode,
   type SelectionSetNode,
   type SelectionNode,
-  type FieldNode,
   type FragmentDefinitionNode,
-  type ArgumentNode,
   type ValueNode,
   Kind,
 } from "graphql";
+
+/** Represents a JSON-compatible value */
+export type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
+/** Represents an argument to a GraphQL field */
+export interface GraphQLFieldArg {
+  name: string;
+  value: JSONValue;
+}
+
+/** Represents a top-level GraphQL field with its arguments */
+export interface GraphQLField {
+  name: string;
+  args: GraphQLFieldArg[];
+}
 
 /**
  * Represents the parsed result of a GraphQL request.
  * Groups all top-level fields by operation type.
  */
 export interface ParsedGraphQLRequest {
-  /** Top-level query fields with arguments (e.g., ["viewer", "repository(owner: \"foo\", name: \"bar\")"]) */
-  queries: string[];
-  /** Top-level mutation fields with arguments (e.g., ["createRepository(input: {...})"]) */
-  mutations: string[];
+  /** Top-level query fields with arguments */
+  queries: GraphQLField[];
+  /** Top-level mutation fields with arguments */
+  mutations: GraphQLField[];
 }
 
 interface GraphQLRequestBody {
@@ -45,8 +64,8 @@ export function parseGraphQLRequest(body: string): ParsedGraphQLRequest | null {
   // Handle batched requests (array of operations)
   const requests = Array.isArray(parsed) ? parsed : [parsed];
 
-  const allQueries: string[] = [];
-  const allMutations: string[] = [];
+  const allQueries: GraphQLField[] = [];
+  const allMutations: GraphQLField[] = [];
 
   for (const req of requests) {
     if (!req.query || typeof req.query !== "string") {
@@ -72,11 +91,30 @@ export function parseGraphQLRequest(body: string): ParsedGraphQLRequest | null {
     return null;
   }
 
-  // Deduplicate
+  // Deduplicate by serializing fields to JSON strings
   return {
-    queries: [...new Set(allQueries)],
-    mutations: [...new Set(allMutations)],
+    queries: deduplicateFields(allQueries),
+    mutations: deduplicateFields(allMutations),
   };
+}
+
+/**
+ * Deduplicate GraphQL fields by comparing their serialized form.
+ */
+function deduplicateFields(fields: GraphQLField[]): GraphQLField[] {
+  const seen = new Set<string>();
+  const result: GraphQLField[] = [];
+
+  for (const field of fields) {
+    const key = JSON.stringify(field);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(field);
+  }
+
+  return result;
 }
 
 /**
@@ -128,8 +166,8 @@ function parseGraphQLDocument(
     }
   }
 
-  const queries: string[] = [];
-  const mutations: string[] = [];
+  const queries: GraphQLField[] = [];
+  const mutations: GraphQLField[] = [];
 
   for (const opDef of selectedOperations) {
     const inlinedSelectionSet = inlineFragments(opDef.selectionSet, fragments);
@@ -221,13 +259,13 @@ function inlineFragments(
 
 /**
  * Extract top-level field representations from a selection set.
- * Includes serialized arguments when present, with variables substituted.
+ * Includes arguments with their values (variables substituted).
  */
 function extractTopLevelFields(
   selectionSet: SelectionSetNode,
   variables: Record<string, unknown>,
-): string[] | null {
-  const fields: string[] = [];
+): GraphQLField[] | null {
+  const fields: GraphQLField[] = [];
 
   for (const selection of selectionSet.selections) {
     if (selection.kind !== Kind.FIELD) {
@@ -239,74 +277,62 @@ function extractTopLevelFields(
     const field = selection;
     const fieldName = field.name.value;
 
+    const args: GraphQLFieldArg[] = [];
     if (field.arguments && field.arguments.length > 0) {
-      const argsStr = serializeArguments(field.arguments, variables);
-      fields.push(`${fieldName}(${argsStr})`);
-    } else {
-      fields.push(fieldName);
+      for (const arg of field.arguments) {
+        args.push({
+          name: arg.name.value,
+          value: valueNodeToJSON(arg.value, variables),
+        });
+      }
     }
+
+    fields.push({ name: fieldName, args });
   }
 
   return fields;
 }
 
 /**
- * Serialize GraphQL arguments to a string representation.
- * Variable references are substituted with their values.
- */
-function serializeArguments(
-  args: readonly ArgumentNode[],
-  variables: Record<string, unknown>,
-): string {
-  const parts: string[] = [];
-  for (const arg of args) {
-    const valueStr = serializeValue(arg.value, variables);
-    parts.push(`${arg.name.value}: ${valueStr}`);
-  }
-  return parts.join(", ");
-}
-
-/**
- * Serialize a GraphQL value node to a string representation.
+ * Convert a GraphQL ValueNode to a JSON value.
  * Variable references are substituted with their values from the variables object.
  */
-function serializeValue(
+function valueNodeToJSON(
   value: ValueNode,
   variables: Record<string, unknown>,
-): string {
+): JSONValue {
   switch (value.kind) {
     case Kind.VARIABLE: {
       const varName = value.name.value;
       if (varName in variables) {
-        return serializeJsValue(variables[varName]);
+        return variables[varName] as JSONValue;
       }
-      // Variable not provided, keep as variable reference
-      return `$${varName}`;
+      // Variable not provided, treat as null (GraphQL default for nullable variables)
+      return null;
     }
     case Kind.INT:
-      return value.value;
+      return parseInt(value.value, 10);
     case Kind.FLOAT:
-      return value.value;
+      return parseFloat(value.value);
     case Kind.STRING:
-      return JSON.stringify(value.value);
+      return value.value;
     case Kind.BOOLEAN:
-      return value.value ? "true" : "false";
+      return value.value;
     case Kind.NULL:
-      return "null";
+      return null;
     case Kind.ENUM:
       return value.value;
-    case Kind.LIST: {
-      const items = value.values.map((v) => serializeValue(v, variables));
-      return `[${items.join(", ")}]`;
-    }
+    case Kind.LIST:
+      return value.values.map((v) => valueNodeToJSON(v, variables));
     case Kind.OBJECT: {
-      const fields = value.fields.map(
-        (f) => `${f.name.value}: ${serializeValue(f.value, variables)}`,
-      );
-      return `{${fields.join(", ")}}`;
+      const obj: { [key: string]: JSONValue } = {};
+      for (const f of value.fields) {
+        obj[f.name.value] = valueNodeToJSON(f.value, variables);
+      }
+      return obj;
     }
     default:
-      return "null";
+      return null;
   }
 }
 
@@ -340,6 +366,19 @@ function serializeJsValue(value: unknown): string {
 }
 
 /**
+ * Format a GraphQL field as a string (e.g., "repository(owner: \"foo\", name: \"bar\")").
+ */
+export function formatGraphQLField(field: GraphQLField): string {
+  if (field.args.length === 0) {
+    return field.name;
+  }
+  const argsStr = field.args
+    .map((arg) => `${arg.name}: ${serializeJsValue(arg.value)}`)
+    .join(", ");
+  return `${field.name}(${argsStr})`;
+}
+
+/**
  * Generate individual request keys for each field in a parsed GraphQL request.
  * Returns a list of keys like "GRAPHQL query viewer", "GRAPHQL mutation createUser(name: \"Bob\")".
  * This allows for granular permission grants per field.
@@ -348,11 +387,11 @@ export function getGraphQLRequestKeys(parsed: ParsedGraphQLRequest): string[] {
   const keys: string[] = [];
 
   for (const field of parsed.queries) {
-    keys.push(`GRAPHQL query ${field}`);
+    keys.push(`GRAPHQL query ${formatGraphQLField(field)}`);
   }
 
   for (const field of parsed.mutations) {
-    keys.push(`GRAPHQL mutation ${field}`);
+    keys.push(`GRAPHQL mutation ${formatGraphQLField(field)}`);
   }
 
   return keys;
@@ -365,11 +404,13 @@ export function getGraphQLDescription(parsed: ParsedGraphQLRequest): string {
   const parts: string[] = [];
 
   if (parsed.queries.length > 0) {
-    parts.push(`query { ${parsed.queries.join(", ")} }`);
+    const queryFields = parsed.queries.map(formatGraphQLField).join(", ");
+    parts.push(`query { ${queryFields} }`);
   }
 
   if (parsed.mutations.length > 0) {
-    parts.push(`mutation { ${parsed.mutations.join(", ")} }`);
+    const mutationFields = parsed.mutations.map(formatGraphQLField).join(", ");
+    parts.push(`mutation { ${mutationFields} }`);
   }
 
   return parts.join("; ");

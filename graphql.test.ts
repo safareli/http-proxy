@@ -4,7 +4,22 @@ import {
   getGraphQLRequestKeys,
   getGraphQLDescription,
   parseGraphQLFromSearchParams,
+  type GraphQLField,
+  type GraphQLFieldArg,
+  type JSONValue,
 } from "./graphql";
+
+/** Helper to create a GraphQLFieldArg */
+const a = (name: string, value: JSONValue): GraphQLFieldArg => ({
+  name,
+  value,
+});
+
+/** Helper to create a GraphQLField */
+const f = (name: string, args: GraphQLFieldArg[] = []): GraphQLField => ({
+  name,
+  args,
+});
 
 describe("parseGraphQLRequest", () => {
   test("parses simple query without fragments", () => {
@@ -15,7 +30,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -39,7 +54,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -59,7 +74,10 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["viewer", 'repository(owner: "foo", name: "bar")'],
+      queries: [
+        f("viewer"),
+        f("repository", [a("owner", "foo"), a("name", "bar")]),
+      ],
       mutations: [],
     });
   });
@@ -88,7 +106,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ['repository(owner: "foo", name: "bar")'],
+      queries: [f("repository", [a("owner", "foo"), a("name", "bar")])],
       mutations: [],
     });
   });
@@ -112,7 +130,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ['node(id: "123")'],
+      queries: [f("node", [a("id", "123")])],
       mutations: [],
     });
   });
@@ -134,7 +152,11 @@ describe("parseGraphQLRequest", () => {
 
     expect(result).toEqual({
       queries: [],
-      mutations: ['createRepository(input: {name: "my-repo", visibility: PRIVATE})'],
+      mutations: [
+        f("createRepository", [
+          a("input", { name: "my-repo", visibility: "PRIVATE" }),
+        ]),
+      ],
     });
   });
 
@@ -156,11 +178,15 @@ describe("parseGraphQLRequest", () => {
 
     expect(result).toEqual({
       queries: [],
-      mutations: ['createRepository(input: {name: "my-repo", visibility: "PRIVATE"})'],
+      mutations: [
+        f("createRepository", [
+          a("input", { name: "my-repo", visibility: "PRIVATE" }),
+        ]),
+      ],
     });
   });
 
-  test("keeps variable reference when variable not provided", () => {
+  test("returns null for unprovided variable", () => {
     const body = JSON.stringify({
       query: `
         mutation CreateRepo($input: CreateRepositoryInput!) {
@@ -178,7 +204,7 @@ describe("parseGraphQLRequest", () => {
 
     expect(result).toEqual({
       queries: [],
-      mutations: ["createRepository(input: $input)"],
+      mutations: [f("createRepository", [a("input", null)])],
     });
   });
 
@@ -197,7 +223,7 @@ describe("parseGraphQLRequest", () => {
 
     expect(result).toEqual({
       queries: [],
-      mutations: ["logout"],
+      mutations: [f("logout")],
     });
   });
 
@@ -214,7 +240,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user", "posts"],
+      queries: [f("user"), f("posts")],
       mutations: [],
     });
   });
@@ -232,8 +258,8 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
-      mutations: ['deleteUser(id: "123")'],
+      queries: [f("user")],
+      mutations: [f("deleteUser", [a("id", "123")])],
     });
   });
 
@@ -250,7 +276,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user", "posts"],
+      queries: [f("user"), f("posts")],
       mutations: [],
     });
   });
@@ -267,7 +293,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -293,8 +319,8 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
-      mutations: ['createPost(title: "Hi")'],
+      queries: [f("user")],
+      mutations: [f("createPost", [a("title", "Hi")])],
     });
   });
 
@@ -348,7 +374,7 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -368,7 +394,9 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ['repository(owner: "archetype-labs", name: "app")'],
+      queries: [
+        f("repository", [a("owner", "archetype-labs"), a("name", "app")]),
+      ],
       mutations: [],
     });
   });
@@ -388,7 +416,9 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ['repository(owner: "archetype-labs", name: "app")'],
+      queries: [
+        f("repository", [a("owner", "archetype-labs"), a("name", "app")]),
+      ],
       mutations: [],
     });
   });
@@ -405,8 +435,8 @@ describe("parseGraphQLRequest", () => {
     const result = parseGraphQLRequest(body);
 
     expect(result).toEqual({
-      queries: ["user"],
-      mutations: ['updateUser(name: "Bob")'],
+      queries: [f("user")],
+      mutations: [f("updateUser", [a("name", "Bob")])],
     });
   });
 });
@@ -414,20 +444,17 @@ describe("parseGraphQLRequest", () => {
 describe("getGraphQLRequestKeys", () => {
   test("returns individual keys for each query field", () => {
     const keys = getGraphQLRequestKeys({
-      queries: ["user", "posts"],
+      queries: [f("user"), f("posts")],
       mutations: [],
     });
 
-    expect(keys).toEqual([
-      "GRAPHQL query user",
-      "GRAPHQL query posts",
-    ]);
+    expect(keys).toEqual(["GRAPHQL query user", "GRAPHQL query posts"]);
   });
 
   test("returns individual keys for each mutation field", () => {
     const keys = getGraphQLRequestKeys({
       queries: [],
-      mutations: ['createUser(name: "Bob")', "logout"],
+      mutations: [f("createUser", [a("name", "Bob")]), f("logout")],
     });
 
     expect(keys).toEqual([
@@ -438,8 +465,8 @@ describe("getGraphQLRequestKeys", () => {
 
   test("returns keys for both queries and mutations", () => {
     const keys = getGraphQLRequestKeys({
-      queries: ["user"],
-      mutations: ['updateUser(id: "1")'],
+      queries: [f("user")],
+      mutations: [f("updateUser", [a("id", "1")])],
     });
 
     expect(keys).toEqual([
@@ -461,7 +488,7 @@ describe("getGraphQLRequestKeys", () => {
 describe("getGraphQLDescription", () => {
   test("returns query description", () => {
     const desc = getGraphQLDescription({
-      queries: ["user", "posts"],
+      queries: [f("user"), f("posts")],
       mutations: [],
     });
 
@@ -471,7 +498,7 @@ describe("getGraphQLDescription", () => {
   test("returns mutation description", () => {
     const desc = getGraphQLDescription({
       queries: [],
-      mutations: ["createUser(name: \"Bob\")"],
+      mutations: [f("createUser", [a("name", "Bob")])],
     });
 
     expect(desc).toBe('mutation { createUser(name: "Bob") }');
@@ -479,8 +506,8 @@ describe("getGraphQLDescription", () => {
 
   test("returns combined description", () => {
     const desc = getGraphQLDescription({
-      queries: ["user"],
-      mutations: ["updateUser(id: \"1\")"],
+      queries: [f("user")],
+      mutations: [f("updateUser", [a("id", "1")])],
     });
 
     expect(desc).toBe('query { user }; mutation { updateUser(id: "1") }');
@@ -495,7 +522,7 @@ describe("parseGraphQLFromSearchParams", () => {
     const result = parseGraphQLFromSearchParams(params);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -513,7 +540,7 @@ describe("parseGraphQLFromSearchParams", () => {
     const result = parseGraphQLFromSearchParams(params);
 
     expect(result).toEqual({
-      queries: ["user"],
+      queries: [f("user")],
       mutations: [],
     });
   });
@@ -532,7 +559,7 @@ describe("parseGraphQLFromSearchParams", () => {
     const result = parseGraphQLFromSearchParams(params);
 
     expect(result).toEqual({
-      queries: ["posts"],
+      queries: [f("posts")],
       mutations: [],
     });
   });
@@ -556,7 +583,7 @@ describe("parseGraphQLFromSearchParams", () => {
     const result = parseGraphQLFromSearchParams(params);
 
     expect(result).toEqual({
-      queries: ['repository(owner: "archetype-labs")'],
+      queries: [f("repository", [a("owner", "archetype-labs")])],
       mutations: [],
     });
   });

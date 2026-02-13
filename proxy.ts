@@ -20,17 +20,25 @@ import {
   getGraphQLDescription,
   type ParsedGraphQLRequest,
 } from "./graphql";
+import {
+  matchPathToTemplate,
+  generatePatternOptions,
+  type PatternOption,
+} from "./openapi";
 
 export type ApprovalResponse =
-  | "allow-once"
-  | "allow-forever"
-  | "reject-once"
-  | "reject-forever";
+  | { type: "allow-once" }
+  | { type: "allow-forever"; pattern: string }
+  | { type: "reject-once" }
+  | { type: "reject-forever"; pattern: string };
+
+export type { PatternOption };
 
 export type RequestApprovalFn = (
   host: string,
   method: string,
   path: string,
+  patternOptions: PatternOption[],
 ) => Promise<ApprovalResponse>;
 
 let requestApprovalFn: RequestApprovalFn | null = null;
@@ -128,17 +136,26 @@ async function handleHttpRequest(
 
   console.log(`  → Requesting approval via Telegram...`);
 
-  try {
-    const approval = await requestApprovalFn(req.url.host, req.method, path);
+  // Generate pattern options for smart approval
+  const template = matchPathToTemplate(req.url.host, req.method, path);
+  const patternOptions = generatePatternOptions(req.method, path, template);
 
-    switch (approval) {
+  try {
+    const approval = await requestApprovalFn(
+      req.url.host,
+      req.method,
+      path,
+      patternOptions,
+    );
+
+    switch (approval.type) {
       case "allow-once":
         console.log(`  → Approved once`);
         return forwardRequestWithSecretSubstitution(req, secretConfig);
 
       case "allow-forever":
-        console.log(`  → Approved forever`);
-        await addGrant(secretConfig, requestKey);
+        console.log(`  → Approved forever with pattern: ${approval.pattern}`);
+        await addGrant(secretConfig, approval.pattern);
         return forwardRequestWithSecretSubstitution(req, secretConfig);
 
       case "reject-once":
@@ -146,8 +163,8 @@ async function handleHttpRequest(
         return new Response("Forbidden - Request rejected", { status: 403 });
 
       case "reject-forever":
-        console.log(`  → Rejected forever`);
-        await addRejection(secretConfig, requestKey);
+        console.log(`  → Rejected forever with pattern: ${approval.pattern}`);
+        await addRejection(secretConfig, approval.pattern);
         return new Response("Forbidden - Request permanently rejected", {
           status: 403,
         });
@@ -234,13 +251,22 @@ async function handleGraphQLRequest(
   console.log(`  → Requesting approval for: ${approvalDescription}`);
 
   try {
+    // TODO for now we are treating uh all queries that need the approval in GraphQL query as one unit that is approved or rejected.
+    // I think later what we should do is if the unit we are trying to approve is a singular thing. Um but if we are multiple we just make multiple request approval calls uh for each of them. And there we can do the pattern stuff where like if something is arguments maybe we s do put stars in different places.
+    // And then based on those I think we can then have a conversation of like hello all mutations for all queries here.
     const approval = await requestApprovalFn(
       req.url.host,
       "GRAPHQL",
       approvalDescription,
+      [
+        {
+          pattern: "all",
+          description: `Exact: ${approvalDescription}`,
+        },
+      ],
     );
 
-    switch (approval) {
+    switch (approval.type) {
       case "allow-once":
         console.log(`  → Approved once`);
         return forwardRequestWithSecretSubstitution(req, secretConfig);
