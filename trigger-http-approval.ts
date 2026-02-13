@@ -1,5 +1,5 @@
 // Simple script to trigger a Telegram approval request through the proxy.
-// Usage: bun trigger-approval.ts
+// Usage: bun trigger-http-approval.ts
 //
 // Make sure the proxy is running first (bun index.ts).
 

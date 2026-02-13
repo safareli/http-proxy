@@ -110,19 +110,19 @@ function requestApproval(
       return registerCallback(key, handler);
     };
 
-    const msg = `🔒 Approval needed:\n\n${method} ${host}${path}`;
+    const msg = `🔒 Approval needed:\n\n${method} ${host} ${path}`;
     const onOnceAllow = reg(`once:allow:${requestId}`, async (ctx) => {
       pendingRequest.resolve({ type: "allow-once" });
       await ctx.answerCallbackQuery({ text: "Allowed (once)" });
       await ctx.editMessageText(
-        `✓ Approved (once): ${method} ${host}${path}\n\n`,
+        `✓ Approved (once): ${method} ${host} ${path}\n\n`,
       );
     });
     const onOnceReject = reg(`once:reject:${requestId}`, async (ctx) => {
       pendingRequest.resolve({ type: "reject-once" });
       await ctx.answerCallbackQuery({ text: "Rejected (once)" });
       await ctx.editMessageText(
-        `✗ Rejected (once): ${method} ${host}${path}\n\n`,
+        `✗ Rejected (once): ${method} ${host} ${path}\n\n`,
       );
     });
 
@@ -148,14 +148,14 @@ function requestApproval(
                   });
                   await ctx.answerCallbackQuery({ text: "Rejected forever" });
                   await ctx.editMessageText(
-                    `🔒 Rejected (forever) ✗: ${method} ${host}${path}\n ${opt.description}\n`,
+                    `🔒 Rejected (forever) ✗: ${method} ${host} ${path}\n ${opt.description}\n`,
                   );
                 }),
               )
               .row();
           });
           await ctx.editMessageText(
-            `✗ Reject (forever):\n\n${method} ${host}${path}`,
+            `✗ Reject (forever):\n\n${method} ${host} ${path}`,
             { reply_markup: rejectKeyboard },
           );
         }),
@@ -173,7 +173,7 @@ function requestApproval(
             });
             await ctx.answerCallbackQuery({ text: "Allowed forever" });
             await ctx.editMessageText(
-              `✓ Approved (forever): ${method} ${host}${path}\n ${opt.description}\n`,
+              `✓ Approved (forever): ${method} ${host} ${path}\n ${opt.description}\n`,
             );
           }),
         )

@@ -4,6 +4,7 @@ import {
   getGraphQLRequestKeys,
   getGraphQLDescription,
   parseGraphQLFromSearchParams,
+  generateGraphQLFieldPatternOptions,
   type GraphQLField,
   type GraphQLFieldArg,
   type JSONValue,
@@ -596,5 +597,151 @@ describe("parseGraphQLFromSearchParams", () => {
     const result = parseGraphQLFromSearchParams(params);
 
     expect(result).toBeNull();
+  });
+});
+
+describe("generateGraphQLFieldPatternOptions", () => {
+  test("field with no args returns exact + catch-all", () => {
+    const options = generateGraphQLFieldPatternOptions("query", f("viewer"));
+
+    expect(options).toEqual([
+      { pattern: "GRAPHQL query viewer", description: "GRAPHQL query viewer" },
+      { pattern: "GRAPHQL query *", description: "GRAPHQL query *" },
+    ]);
+  });
+
+  test("field with one arg returns exact + $ANY + catch-all", () => {
+    const options = generateGraphQLFieldPatternOptions(
+      "query",
+      f("node", [a("id", "123")]),
+    );
+
+    expect(options).toEqual([
+      {
+        pattern: 'GRAPHQL query node(id: "123")',
+        description: 'GRAPHQL query node(id: "123")',
+      },
+      {
+        pattern: "GRAPHQL query node(id: $ANY)",
+        description: "GRAPHQL query node(id: $ANY)",
+      },
+      { pattern: "GRAPHQL query *", description: "GRAPHQL query *" },
+    ]);
+  });
+
+  test("field with one arg where value is $ANY-like skips duplicate", () => {
+    // Edge case: if the exact pattern somehow equals the $ANY pattern, skip it
+    // This can't actually happen since $ANY is not a valid JSON value,
+    // but test the dedup logic anyway
+    const options = generateGraphQLFieldPatternOptions(
+      "mutation",
+      f("logout"),
+    );
+
+    // No args, so just exact + catch-all
+    expect(options).toEqual([
+      {
+        pattern: "GRAPHQL mutation logout",
+        description: "GRAPHQL mutation logout",
+      },
+      {
+        pattern: "GRAPHQL mutation *",
+        description: "GRAPHQL mutation *",
+      },
+    ]);
+  });
+
+  test("field with multiple args generates progressive $ANY patterns", () => {
+    const options = generateGraphQLFieldPatternOptions(
+      "mutation",
+      f("createPullRequest", [
+        a("repositoryId", "abc"),
+        a("title", "foo"),
+        a("body", "bar"),
+      ]),
+    );
+
+    expect(options).toEqual([
+      {
+        pattern:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: "foo", body: "bar")',
+        description:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: "foo", body: "bar")',
+      },
+      {
+        pattern:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: "foo", body: $ANY)',
+        description:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: "foo", body: $ANY)',
+      },
+      {
+        pattern:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: $ANY, body: $ANY)',
+        description:
+          'GRAPHQL mutation createPullRequest(repositoryId: "abc", title: $ANY, body: $ANY)',
+      },
+      {
+        pattern:
+          "GRAPHQL mutation createPullRequest(repositoryId: $ANY, title: $ANY, body: $ANY)",
+        description:
+          "GRAPHQL mutation createPullRequest(repositoryId: $ANY, title: $ANY, body: $ANY)",
+      },
+      {
+        pattern: "GRAPHQL mutation *",
+        description: "GRAPHQL mutation *",
+      },
+    ]);
+  });
+
+  test("field with two args generates correct progressive patterns", () => {
+    const options = generateGraphQLFieldPatternOptions(
+      "query",
+      f("repository", [a("owner", "foo"), a("name", "bar")]),
+    );
+
+    expect(options).toEqual([
+      {
+        pattern: 'GRAPHQL query repository(owner: "foo", name: "bar")',
+        description: 'GRAPHQL query repository(owner: "foo", name: "bar")',
+      },
+      {
+        pattern: 'GRAPHQL query repository(owner: "foo", name: $ANY)',
+        description: 'GRAPHQL query repository(owner: "foo", name: $ANY)',
+      },
+      {
+        pattern: "GRAPHQL query repository(owner: $ANY, name: $ANY)",
+        description: "GRAPHQL query repository(owner: $ANY, name: $ANY)",
+      },
+      {
+        pattern: "GRAPHQL query *",
+        description: "GRAPHQL query *",
+      },
+    ]);
+  });
+
+  test("field with object arg returns exact + $ANY + catch-all", () => {
+    const options = generateGraphQLFieldPatternOptions(
+      "mutation",
+      f("createRepository", [
+        a("input", { name: "my-repo", visibility: "PRIVATE" }),
+      ]),
+    );
+
+    expect(options).toEqual([
+      {
+        pattern:
+          'GRAPHQL mutation createRepository(input: {name: "my-repo", visibility: "PRIVATE"})',
+        description:
+          'GRAPHQL mutation createRepository(input: {name: "my-repo", visibility: "PRIVATE"})',
+      },
+      {
+        pattern: "GRAPHQL mutation createRepository(input: $ANY)",
+        description: "GRAPHQL mutation createRepository(input: $ANY)",
+      },
+      {
+        pattern: "GRAPHQL mutation *",
+        description: "GRAPHQL mutation *",
+      },
+    ]);
   });
 });

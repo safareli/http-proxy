@@ -9,6 +9,7 @@ import {
   type ValueNode,
   Kind,
 } from "graphql";
+import type { PatternOption } from "./openapi";
 
 /** Represents a JSON-compatible value */
 export type JSONValue =
@@ -444,6 +445,64 @@ export function parseGraphQLFromSearchParams(
   }
 
   return parseGraphQLDocument(query, operationName, variables);
+}
+
+/**
+ * Generate progressive pattern options for a single GraphQL field.
+ * Substitutes $ANY from right to left for fields with arguments.
+ */
+export function generateGraphQLFieldPatternOptions(
+  opType: string,
+  field: GraphQLField,
+): PatternOption[] {
+  const prefix = `GRAPHQL ${opType}`;
+  const options: PatternOption[] = [];
+
+  // Always start with exact pattern
+  const exactField = formatGraphQLField(field);
+  const exactPattern = `${prefix} ${exactField}`;
+  options.push({
+    pattern: exactPattern,
+    description: exactPattern,
+  });
+
+  if (field.args.length > 1) {
+    // Generate progressive patterns substituting $ANY from right to left
+    const usedPatterns = new Set<string>();
+    usedPatterns.add(exactPattern);
+
+    for (let i = field.args.length - 1; i >= 0; i--) {
+      const argsStr = field.args
+        .map((arg, j) => {
+          if (j >= i) {
+            return `${arg.name}: $ANY`;
+          }
+          return `${arg.name}: ${serializeJsValue(arg.value)}`;
+        })
+        .join(", ");
+
+      const pattern = `${prefix} ${field.name}(${argsStr})`;
+      if (usedPatterns.has(pattern)) {
+        continue;
+      }
+      usedPatterns.add(pattern);
+
+      options.push({ pattern, description: pattern });
+    }
+  } else if (field.args.length === 1) {
+    const anyPattern = `${prefix} ${field.name}(${field.args[0]!.name}: $ANY)`;
+    if (anyPattern !== exactPattern) {
+      options.push({ pattern: anyPattern, description: anyPattern });
+    }
+  }
+
+  // Always add catch-all as final option
+  options.push({
+    pattern: `${prefix} *`,
+    description: `${prefix} *`,
+  });
+
+  return options;
 }
 
 /**

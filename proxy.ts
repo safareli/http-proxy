@@ -18,7 +18,10 @@ import {
   parseGraphQLFromSearchParams,
   getGraphQLRequestKeys,
   getGraphQLDescription,
+  formatGraphQLField,
+  generateGraphQLFieldPatternOptions,
   type ParsedGraphQLRequest,
+  type GraphQLField,
 } from "./graphql";
 import {
   matchPathToTemplate,
@@ -215,16 +218,28 @@ async function handleGraphQLRequest(
     }
   }
 
-  // Check which keys are already granted vs need approval
+  // Check which fields are already granted vs need approval
   const grantedPatterns: string[] = [];
-  const needsApproval: string[] = [];
+  const needsApproval: { key: string; opType: string; field: GraphQLField }[] =
+    [];
 
-  for (const key of keys) {
+  for (const field of parsed.queries) {
+    const key = `GRAPHQL query ${formatGraphQLField(field)}`;
     const matchingGrant = findMatchingGrant(secretConfig, key);
     if (matchingGrant) {
       grantedPatterns.push(matchingGrant);
     } else {
-      needsApproval.push(key);
+      needsApproval.push({ key, opType: "query", field });
+    }
+  }
+
+  for (const field of parsed.mutations) {
+    const key = `GRAPHQL mutation ${formatGraphQLField(field)}`;
+    const matchingGrant = findMatchingGrant(secretConfig, key);
+    if (matchingGrant) {
+      grantedPatterns.push(matchingGrant);
+    } else {
+      needsApproval.push({ key, opType: "mutation", field });
     }
   }
 
@@ -246,24 +261,30 @@ async function handleGraphQLRequest(
 
   // Build description for approval request
   const approvalDescription = needsApproval
-    .map((key) => key.replace("GRAPHQL ", ""))
+    .map(({ key }) => key.replace("GRAPHQL ", ""))
     .join("; ");
   console.log(`  → Requesting approval for: ${approvalDescription}`);
 
+  // Generate pattern options: smart patterns for single field, exact-only for multiple
+  const patternOptions: PatternOption[] =
+    needsApproval.length === 1
+      ? generateGraphQLFieldPatternOptions(
+          needsApproval[0]!.opType,
+          needsApproval[0]!.field,
+        )
+      : [
+          {
+            pattern: "all",
+            description: `Exact: ${approvalDescription}`,
+          },
+        ];
+
   try {
-    // TODO for now we are treating uh all queries that need the approval in GraphQL query as one unit that is approved or rejected.
-    // I think later what we should do is if the unit we are trying to approve is a singular thing. Um but if we are multiple we just make multiple request approval calls uh for each of them. And there we can do the pattern stuff where like if something is arguments maybe we s do put stars in different places.
-    // And then based on those I think we can then have a conversation of like hello all mutations for all queries here.
     const approval = await requestApprovalFn(
       req.url.host,
       "GRAPHQL",
       approvalDescription,
-      [
-        {
-          pattern: "all",
-          description: `Exact: ${approvalDescription}`,
-        },
-      ],
+      patternOptions,
     );
 
     switch (approval.type) {
@@ -272,10 +293,16 @@ async function handleGraphQLRequest(
         return forwardRequestWithSecretSubstitution(req, secretConfig);
 
       case "allow-forever":
-        console.log(`  → Approved forever`);
-        // Add grant for each key that needed approval
-        for (const key of needsApproval) {
-          await addGrant(secretConfig, key);
+        if (needsApproval.length === 1) {
+          console.log(
+            `  → Approved forever with pattern: ${approval.pattern}`,
+          );
+          await addGrant(secretConfig, approval.pattern);
+        } else {
+          console.log(`  → Approved forever`);
+          for (const { key } of needsApproval) {
+            await addGrant(secretConfig, key);
+          }
         }
         return forwardRequestWithSecretSubstitution(req, secretConfig);
 
@@ -284,10 +311,16 @@ async function handleGraphQLRequest(
         return new Response("Forbidden - Request rejected", { status: 403 });
 
       case "reject-forever":
-        console.log(`  → Rejected forever`);
-        // Add rejection for each key that needed approval
-        for (const key of needsApproval) {
-          await addRejection(secretConfig, key);
+        if (needsApproval.length === 1) {
+          console.log(
+            `  → Rejected forever with pattern: ${approval.pattern}`,
+          );
+          await addRejection(secretConfig, approval.pattern);
+        } else {
+          console.log(`  → Rejected forever`);
+          for (const { key } of needsApproval) {
+            await addRejection(secretConfig, key);
+          }
         }
         return new Response("Forbidden - Request permanently rejected", {
           status: 403,
