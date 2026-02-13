@@ -22,10 +22,16 @@ interface PendingRequest {
   resolve: (response: ApprovalResponse) => void;
   timeout: Timer;
   callbackKeys: string[];
+  messageId?: number;
+  abortedByClient?: boolean;
 }
 
 const pendingRequests = new Map<string, PendingRequest>();
 let requestIdCounter = 0;
+
+function code(text: string): string {
+  return `<code>${text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`;
+}
 
 const bot = new Bot(token);
 
@@ -87,6 +93,7 @@ function requestApproval(
   method: string,
   path: string,
   patternOptions: PatternOption[],
+  signal: AbortSignal,
 ): Promise<ApprovalResponse> {
   return new Promise<ApprovalResponse>((resolveRaw) => {
     const requestId = String(++requestIdCounter);
@@ -104,25 +111,50 @@ function requestApproval(
     };
     pendingRequests.set(requestId, pendingRequest);
 
+    // Handle client disconnect
+    const onAbort = () => {
+      if (!pendingRequests.has(requestId)) return;
+      console.log(`Request ${requestId} aborted (client disconnected)`);
+      pendingRequest.abortedByClient = true;
+      pendingRequest.resolve({ type: "reject-once" });
+      if (pendingRequest.messageId) {
+        bot.api
+          .editMessageText(
+            Number(ownerId),
+            pendingRequest.messageId,
+            `⊘ Auto-closed (client disconnected):\n\n${method} ${host}\n${code(path)}`,
+            { parse_mode: "HTML" },
+          )
+          .catch(() => {});
+      }
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+
     const reg = (key: string, handler: (ctx: any) => Promise<void>): string => {
       pendingRequest.callbackKeys.push(key);
 
       return registerCallback(key, handler);
     };
 
-    const msg = `🔒 Approval needed:\n\n${method} ${host} ${path}`;
+    const msg = `🔒 Approval needed:\n\n${method} ${host}\n${code(path)}`;
     const onOnceAllow = reg(`once:allow:${requestId}`, async (ctx) => {
       pendingRequest.resolve({ type: "allow-once" });
       await ctx.answerCallbackQuery({ text: "Allowed (once)" });
       await ctx.editMessageText(
-        `✓ Approved (once): ${method} ${host} ${path}\n\n`,
+        `✓ Approved (once):\n\n${method} ${host}\n${code(path)}`,
+        { parse_mode: "HTML" },
       );
     });
     const onOnceReject = reg(`once:reject:${requestId}`, async (ctx) => {
       pendingRequest.resolve({ type: "reject-once" });
       await ctx.answerCallbackQuery({ text: "Rejected (once)" });
       await ctx.editMessageText(
-        `✗ Rejected (once): ${method} ${host} ${path}\n\n`,
+        `✗ Rejected (once):\n\n${method} ${host}\n${code(path)}`,
+        { parse_mode: "HTML" },
       );
     });
 
@@ -148,15 +180,16 @@ function requestApproval(
                   });
                   await ctx.answerCallbackQuery({ text: "Rejected forever" });
                   await ctx.editMessageText(
-                    `🔒 Rejected (forever) ✗: ${method} ${host} ${path}\n ${opt.description}\n`,
+                    `🔒 Rejected (forever) ✗:\n\n${method} ${host}\n${code(path)}\n${code(opt.description)}`,
+                    { parse_mode: "HTML" },
                   );
                 }),
               )
               .row();
           });
           await ctx.editMessageText(
-            `✗ Reject (forever):\n\n${method} ${host} ${path}`,
-            { reply_markup: rejectKeyboard },
+            `✗ Reject (forever):\n\n${method} ${host}\n${code(path)}`,
+            { reply_markup: rejectKeyboard, parse_mode: "HTML" },
           );
         }),
       )
@@ -173,7 +206,8 @@ function requestApproval(
             });
             await ctx.answerCallbackQuery({ text: "Allowed forever" });
             await ctx.editMessageText(
-              `✓ Approved (forever): ${method} ${host} ${path}\n ${opt.description}\n`,
+              `✓ Approved (forever):\n\n${method} ${host}\n${code(path)}\n${code(opt.description)}`,
+              { parse_mode: "HTML" },
             );
           }),
         )
@@ -181,7 +215,21 @@ function requestApproval(
     });
 
     bot.api
-      .sendMessage(Number(ownerId), msg, { reply_markup: keyboard })
+      .sendMessage(Number(ownerId), msg, { reply_markup: keyboard, parse_mode: "HTML" })
+      .then((sent) => {
+        pendingRequest.messageId = sent.message_id;
+        // If aborted before sendMessage completed, edit now
+        if (pendingRequest.abortedByClient) {
+          bot.api
+            .editMessageText(
+              Number(ownerId),
+              sent.message_id,
+              `⊘ Auto-closed (client disconnected):\n\n${method} ${host}\n${code(path)}`,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
+        }
+      })
       .catch((err) => {
         console.error("Failed to send approval request:", err);
         pendingRequest.resolve({ type: "reject-once" });

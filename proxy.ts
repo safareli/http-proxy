@@ -42,6 +42,7 @@ export type RequestApprovalFn = (
   method: string,
   path: string,
   patternOptions: PatternOption[],
+  signal: AbortSignal,
 ) => Promise<ApprovalResponse>;
 
 let requestApprovalFn: RequestApprovalFn | null = null;
@@ -55,6 +56,7 @@ type RequestLoaded = {
   method: string;
   headers: Headers;
   body: ArrayBuffer | null;
+  signal: AbortSignal;
 };
 
 const loadRequest = async (req: Request): Promise<RequestLoaded> => {
@@ -69,7 +71,7 @@ const loadRequest = async (req: Request): Promise<RequestLoaded> => {
     req.method !== "GET" && req.method !== "HEAD"
       ? await req.arrayBuffer()
       : null;
-  return { url, method: req.method, headers, body };
+  return { url, method: req.method, headers, body, signal: req.signal };
 };
 
 async function handleRequest(reqOriginal: Request): Promise<Response> {
@@ -103,7 +105,7 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
 
   // Check if this is a GraphQL endpoint
   if (isGraphQLEndpoint(req.url.host, req.url.pathname)) {
-    return handleGraphQLRequest(req, secretConfig, path);
+    return handleGraphQLRequest(req, secretConfig);
   }
 
   return handleHttpRequest(req, secretConfig, path);
@@ -149,6 +151,7 @@ async function handleHttpRequest(
       req.method,
       path,
       patternOptions,
+      req.signal,
     );
 
     switch (approval.type) {
@@ -181,7 +184,6 @@ async function handleHttpRequest(
 async function handleGraphQLRequest(
   req: RequestLoaded,
   secretConfig: SecretConfig,
-  path: string,
 ): Promise<Response> {
   // Parse GraphQL request
   let parsed: ParsedGraphQLRequest | null = null;
@@ -259,73 +261,63 @@ async function handleGraphQLRequest(
     return new Response("Forbidden - No approval handler", { status: 403 });
   }
 
-  // Build description for approval request
-  const approvalDescription = needsApproval
-    .map(({ key }) => key.replace("GRAPHQL ", ""))
-    .join("; ");
-  console.log(`  → Requesting approval for: ${approvalDescription}`);
+  // Abort all pending approvals on client disconnect OR any rejection
+  const abort = new AbortController();
+  req.signal.addEventListener("abort", () => abort.abort(), { once: true });
 
-  // Generate pattern options: smart patterns for single field, exact-only for multiple
-  const patternOptions: PatternOption[] =
-    needsApproval.length === 1
-      ? generateGraphQLFieldPatternOptions(
-          needsApproval[0]!.opType,
-          needsApproval[0]!.field,
-        )
-      : [
-          {
-            pattern: "all",
-            description: `Exact: ${approvalDescription}`,
-          },
-        ];
-
+  // Request approval for each field in parallel
   try {
-    const approval = await requestApprovalFn(
-      req.url.host,
-      "GRAPHQL",
-      approvalDescription,
-      patternOptions,
+    const approvalResults = await Promise.all(
+      needsApproval.map(async ({ key, opType, field }) => {
+        const description = key.replace("GRAPHQL ", "");
+        console.log(`  → Requesting approval for: ${description}`);
+        const patternOptions = generateGraphQLFieldPatternOptions(
+          opType,
+          field,
+        );
+        const approval = await requestApprovalFn!(
+          req.url.host,
+          "GRAPHQL",
+          description,
+          patternOptions,
+          abort.signal,
+        );
+        if (
+          approval.type === "reject-once" ||
+          approval.type === "reject-forever"
+        ) {
+          abort.abort();
+        }
+        return { key, approval };
+      }),
     );
 
-    switch (approval.type) {
-      case "allow-once":
-        console.log(`  → Approved once`);
-        return forwardRequestWithSecretSubstitution(req, secretConfig);
-
-      case "allow-forever":
-        if (needsApproval.length === 1) {
-          console.log(
-            `  → Approved forever with pattern: ${approval.pattern}`,
-          );
-          await addGrant(secretConfig, approval.pattern);
-        } else {
-          console.log(`  → Approved forever`);
-          for (const { key } of needsApproval) {
-            await addGrant(secretConfig, key);
-          }
-        }
-        return forwardRequestWithSecretSubstitution(req, secretConfig);
-
-      case "reject-once":
-        console.log(`  → Rejected once`);
-        return new Response("Forbidden - Request rejected", { status: 403 });
-
-      case "reject-forever":
-        if (needsApproval.length === 1) {
-          console.log(
-            `  → Rejected forever with pattern: ${approval.pattern}`,
-          );
-          await addRejection(secretConfig, approval.pattern);
-        } else {
-          console.log(`  → Rejected forever`);
-          for (const { key } of needsApproval) {
-            await addRejection(secretConfig, key);
-          }
-        }
-        return new Response("Forbidden - Request permanently rejected", {
-          status: 403,
-        });
+    // Save forever patterns (grants and rejections)
+    for (const { key, approval } of approvalResults) {
+      if (approval.type === "allow-forever") {
+        console.log(`  → Approved forever with pattern: ${approval.pattern}`);
+        await addGrant(secretConfig, approval.pattern);
+      } else if (approval.type === "reject-forever") {
+        console.log(`  → Rejected forever with pattern: ${approval.pattern}`);
+        await addRejection(secretConfig, approval.pattern);
+      } else if (approval.type === "allow-once") {
+        console.log(`  → Approved once: ${key}`);
+      } else {
+        console.log(`  → Rejected once: ${key}`);
+      }
     }
+
+    // Forward only if ALL are approved
+    const allApproved = approvalResults.every(
+      ({ approval }) =>
+        approval.type === "allow-once" || approval.type === "allow-forever",
+    );
+
+    if (!allApproved) {
+      return new Response("Forbidden - Request rejected", { status: 403 });
+    }
+
+    return forwardRequestWithSecretSubstitution(req, secretConfig);
   } catch (error) {
     console.log(`  → Approval timeout or error: ${error}`);
     return new Response("Forbidden - Approval timeout", { status: 403 });

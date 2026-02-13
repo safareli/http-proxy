@@ -18,6 +18,12 @@ const res = await fetch("https://127.0.0.1:443/graphql", {
       createPullRequest(input: $input) {
         pullRequest { id url }
       }
+      addComment(input: {subjectId: "issue123", body: "hello"}) {
+        commentEdge { node { id body } }
+      }
+      likeComment(input: {subjectId: "issue123", body: "hello"}) {
+        commentEdge { node { id body } }
+      }
     }`,
     variables: {
       input: {
