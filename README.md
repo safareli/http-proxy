@@ -1,4 +1,4 @@
-# vm-http-proxy
+# http-proxy
 
 HTTPS MITM proxy with Telegram approval flow. Intercepts requests, detects secret tokens, and requires Telegram approval before forwarding sensitive requests.
 
@@ -115,15 +115,15 @@ The proxy listens on:
 }
 ```
 
-| Field | Description |
-|---|---|
-| `secrets[].secret` | The fake token your VM uses in requests |
-| `secrets[].secretEnvVarName` | Env var containing the real token |
-| `secrets[].grants` | Patterns for permanently allowed requests |
-| `secrets[].rejections` | Patterns for permanently blocked requests |
-| `graphqlEndpoints` | Paths treated as GraphQL endpoints (e.g. `["/graphql"]`) |
-| `openApiSpec.url` | URL to fetch an OpenAPI spec from (cached in `.openapi-cache/`) |
-| `openApiSpec.path` | Local file path to an OpenAPI spec |
+| Field                        | Description                                                     |
+| ---------------------------- | --------------------------------------------------------------- |
+| `secrets[].secret`           | The fake token your VM uses in requests                         |
+| `secrets[].secretEnvVarName` | Env var containing the real token                               |
+| `secrets[].grants`           | Patterns for permanently allowed requests                       |
+| `secrets[].rejections`       | Patterns for permanently blocked requests                       |
+| `graphqlEndpoints`           | Paths treated as GraphQL endpoints (e.g. `["/graphql"]`)        |
+| `openApiSpec.url`            | URL to fetch an OpenAPI spec from (cached in `.openapi-cache/`) |
+| `openApiSpec.path`           | Local file path to an OpenAPI spec                              |
 
 ## HTTP pattern matching
 
