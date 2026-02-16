@@ -279,6 +279,14 @@ When a GraphQL request contains multiple top-level fields that need approval, ap
 
 When a request needs approval, you receive a Telegram message with these buttons:
 
+### HTTP with openapi
+
+![HTTP approval](assets/http.png)
+
+### Graphql
+
+![GraphQL approval](assets/gql.png) |
+
 - **✓ Once** - Allow this specific request once
 - **✗ Once** - Reject this specific request once
 - **✗ Forever** - Expands to show pattern options for permanent rejection
