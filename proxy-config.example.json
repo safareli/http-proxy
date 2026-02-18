@@ -1,10 +1,33 @@
 {
   "api.github.com": {
-    "secret": "github_pat_XXXXXXXXXXXXXXXXXXXXXX_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-    "secretEnvVarName": "GH_TOKEN",
-    "grants": [
-      "GET /repos/my_org/my_repo/actions/runs"
+    "graphqlEndpoints": [
+      "/graphql"
     ],
-    "rejections": []
+    "openApiSpec": {
+      "url": "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml"
+    },
+    "secrets": [
+      {
+        "secret": "github_pat_XXXXXXXXXXXXXXXXXXXXXX_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "secretEnvVarName": "GH_TOKEN",
+        "grants": [
+          "GET /repos/*/*/actions/runs",
+          "GET /repos/*/*/actions/runs/*",
+          "GET /repos/*/*/actions/workflows/*",
+          "GET /repos/*/*/actions/workflows",
+          "GET /repos/*/*/actions/runs/*/jobs",
+          "GET /repos/*/*/actions/jobs/*",
+          "GET /repos/*/*/actions/runs/*/logs",
+          "GRAPHQL query repository(owner: $ANY, name: $ANY)",
+          "GRAPHQL mutation createPullRequest(input: $ANY)",
+          "GRAPHQL mutation addComment(input: $ANY)",
+          "GRAPHQL mutation likeComment(input: $ANY)",
+          "GET /repos/*/*/pulls",
+          "GRAPHQL query __type(name: \"SearchType\")",
+          "GRAPHQL query search(query: $ANY, type: $ANY, first: $ANY, after: $ANY)"
+        ],
+        "rejections": []
+      }
+    ]
   }
 }
