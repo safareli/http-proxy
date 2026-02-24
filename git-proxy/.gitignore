@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Bun
+bun.lockb
+
+# Build output
+git-proxy
+
+# Config (use example)
+config.json
+
+# Repos directory (runtime data)
+repos/
+.repos/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
