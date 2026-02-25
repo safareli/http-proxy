@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { GitHostConfig, RepoConfig } from "../git-config";
@@ -170,6 +170,83 @@ describe("git/repo.ts", () => {
       },
     );
     expect(hasMainBranch.success).toBe(true);
+  });
+
+  test("initializeRepo installs pre-receive hook when hook options are provided", async () => {
+    const upstreamPath = await createUpstreamRepo(tmpDir, "upstream-hook");
+    const reposDir = join(tmpDir, "repos");
+    const gitConfig = createGitHostConfig(reposDir);
+    const repoKey = "owner/hook-enabled";
+
+    const hookSocketPath = join(tmpDir, "socket", ".hook.sock");
+    const customConfigPath = join(tmpDir, "config", "proxy-config.json");
+    const customRunnerPath = join(tmpDir, "custom", "hooks-runner.ts");
+
+    const previousConfigPath = process.env.PROXY_CONFIG_PATH;
+    const previousHookRunnerPath = process.env.GIT_PROXY_HOOK_RUNNER_PATH;
+
+    process.env.PROXY_CONFIG_PATH = customConfigPath;
+    process.env.GIT_PROXY_HOOK_RUNNER_PATH = customRunnerPath;
+
+    try {
+      const repoPath = await initializeRepo(
+        repoKey,
+        createRepoConfig(upstreamPath, "main"),
+        gitConfig,
+        {},
+        {
+          hook: {
+            host: "github.com",
+            socketPath: hookSocketPath,
+          },
+        },
+      );
+
+      const hookPath = join(repoPath, "hooks", "pre-receive");
+      expect(existsSync(hookPath)).toBe(true);
+
+      const hookScript = readFileSync(hookPath, "utf8");
+      expect(hookScript).toContain(
+        `export PROXY_CONFIG_PATH='${resolve(customConfigPath)}'`,
+      );
+      expect(hookScript).toContain(
+        `export GIT_PROXY_SOCK='${resolve(hookSocketPath)}'`,
+      );
+      expect(hookScript).toContain(
+        `exec bun run '${resolve(customRunnerPath)}' 'github.com' '${repoKey}'`,
+      );
+
+      const hookMode = statSync(hookPath).mode & 0o777;
+      expect((hookMode & 0o111) !== 0).toBe(true);
+    } finally {
+      if (previousConfigPath === undefined) {
+        delete process.env.PROXY_CONFIG_PATH;
+      } else {
+        process.env.PROXY_CONFIG_PATH = previousConfigPath;
+      }
+
+      if (previousHookRunnerPath === undefined) {
+        delete process.env.GIT_PROXY_HOOK_RUNNER_PATH;
+      } else {
+        process.env.GIT_PROXY_HOOK_RUNNER_PATH = previousHookRunnerPath;
+      }
+    }
+  });
+
+  test("initializeRepo does not install pre-receive hook by default", async () => {
+    const upstreamPath = await createUpstreamRepo(tmpDir, "upstream-no-hook");
+    const reposDir = join(tmpDir, "repos");
+    const gitConfig = createGitHostConfig(reposDir);
+
+    const repoPath = await initializeRepo(
+      "owner/no-hook",
+      createRepoConfig(upstreamPath, "main"),
+      gitConfig,
+      {},
+    );
+
+    const hookPath = join(repoPath, "hooks", "pre-receive");
+    expect(existsSync(hookPath)).toBe(false);
   });
 
   test("initializeRepo is idempotent and updates origin URL on reconfigure", async () => {

@@ -1,13 +1,26 @@
 import { dirname, join, resolve } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { GitHostConfig, RepoConfig } from "../git-config";
 import { git } from "./utils";
+
+export interface RepoHookOptions {
+  host: string;
+  socketPath: string;
+}
+
+export interface InitializeRepoOptions {
+  hook?: RepoHookOptions;
+}
 
 export function resolveReposRoot(gitConfig: GitHostConfig): string {
   return resolve(gitConfig.repos_dir);
 }
 
-export function getBareRepoPath(gitConfig: GitHostConfig, repoKey: string): string {
+export function getBareRepoPath(
+  gitConfig: GitHostConfig,
+  repoKey: string,
+): string {
   return join(resolveReposRoot(gitConfig), `${repoKey}.git`);
 }
 
@@ -26,7 +39,50 @@ export function setupSshEnv(gitConfig: GitHostConfig): Record<string, string> {
   return { GIT_SSH_COMMAND: sshCommand };
 }
 
-async function ensureOriginRemote(repoPath: string, upstream: string): Promise<void> {
+function getHookRunnerPath(): string {
+  if (process.env.GIT_PROXY_HOOK_RUNNER_PATH) {
+    return resolve(process.env.GIT_PROXY_HOOK_RUNNER_PATH);
+  }
+
+  return join(dirname(fileURLToPath(import.meta.url)), "hooks.ts");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function getProxyConfigPathForHook(): string {
+  return resolve(process.env.PROXY_CONFIG_PATH ?? "./proxy-config.json");
+}
+
+function installPreReceiveHook(
+  repoPath: string,
+  repoKey: string,
+  hookOptions: RepoHookOptions,
+): void {
+  const hooksDir = join(repoPath, "hooks");
+  if (!existsSync(hooksDir)) {
+    mkdirSync(hooksDir, { recursive: true });
+  }
+
+  const hookPath = join(hooksDir, "pre-receive");
+
+  const hookScript = `#!/bin/sh
+set -eu
+
+export PROXY_CONFIG_PATH=${shellQuote(getProxyConfigPathForHook())}
+export GIT_PROXY_SOCK=${shellQuote(resolve(hookOptions.socketPath))}
+
+exec bun run ${shellQuote(getHookRunnerPath())} ${shellQuote(hookOptions.host)} ${shellQuote(repoKey)}
+`;
+
+  writeFileSync(hookPath, hookScript, { mode: 0o755 });
+}
+
+async function ensureOriginRemote(
+  repoPath: string,
+  upstream: string,
+): Promise<void> {
   const setUrlResult = await git(["remote", "set-url", "origin", upstream], {
     cwd: repoPath,
   });
@@ -40,7 +96,9 @@ async function ensureOriginRemote(repoPath: string, upstream: string): Promise<v
   });
 
   if (!addRemoteResult.success) {
-    throw new Error(`Failed to configure origin remote: ${addRemoteResult.stderr}`);
+    throw new Error(
+      `Failed to configure origin remote: ${addRemoteResult.stderr}`,
+    );
   }
 }
 
@@ -72,7 +130,9 @@ async function ensureFetchRefspec(repoPath: string): Promise<void> {
   );
 
   if (!addRefspecResult.success) {
-    throw new Error(`Failed to configure fetch refspec: ${addRefspecResult.stderr}`);
+    throw new Error(
+      `Failed to configure fetch refspec: ${addRefspecResult.stderr}`,
+    );
   }
 }
 
@@ -81,6 +141,8 @@ export async function initializeRepo(
   repoConfig: RepoConfig,
   gitConfig: GitHostConfig,
   sshEnv: Record<string, string>,
+  // TODO should be required
+  options: InitializeRepoOptions = {},
 ): Promise<string> {
   const repoPath = getBareRepoPath(gitConfig, repoKey);
   const parentDir = dirname(repoPath);
@@ -92,7 +154,9 @@ export async function initializeRepo(
   if (!existsSync(repoPath)) {
     const initResult = await git(["init", "--bare", repoPath]);
     if (!initResult.success) {
-      throw new Error(`Failed to init bare repo ${repoKey}: ${initResult.stderr}`);
+      throw new Error(
+        `Failed to init bare repo ${repoKey}: ${initResult.stderr}`,
+      );
     }
   }
 
@@ -103,14 +167,25 @@ export async function initializeRepo(
     cwd: repoPath,
   });
   if (!receivePackResult.success) {
-    throw new Error(`Failed to enable receive-pack: ${receivePackResult.stderr}`);
+    throw new Error(
+      `Failed to enable receive-pack: ${receivePackResult.stderr}`,
+    );
   }
 
-  const quarantineResult = await git(["config", "receive.quarantine", "false"], {
-    cwd: repoPath,
-  });
+  const quarantineResult = await git(
+    ["config", "receive.quarantine", "false"],
+    {
+      cwd: repoPath,
+    },
+  );
   if (!quarantineResult.success) {
-    throw new Error(`Failed to disable receive.quarantine: ${quarantineResult.stderr}`);
+    throw new Error(
+      `Failed to disable receive.quarantine: ${quarantineResult.stderr}`,
+    );
+  }
+
+  if (options.hook) {
+    installPreReceiveHook(repoPath, repoKey, options.hook);
   }
 
   await syncRepoFromUpstream(repoPath, sshEnv);
@@ -122,7 +197,9 @@ export async function initializeRepo(
     },
   );
   if (!setHeadResult.success) {
-    throw new Error(`Failed to set default HEAD branch: ${setHeadResult.stderr}`);
+    throw new Error(
+      `Failed to set default HEAD branch: ${setHeadResult.stderr}`,
+    );
   }
 
   return repoPath;
