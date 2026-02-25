@@ -62,10 +62,15 @@ type RequestLoaded = {
   signal: AbortSignal;
 };
 
-const loadRequest = async (req: Request): Promise<RequestLoaded> => {
+function getCanonicalUrl(req: Request): URL {
   const url = new URL(req.url);
   const host = req.headers.get("host") || url.host;
   url.host = host;
+  return url;
+}
+
+const loadRequest = async (req: Request): Promise<RequestLoaded> => {
+  const url = getCanonicalUrl(req);
 
   const headers = new Headers(req.headers);
   headers.delete("host");
@@ -78,13 +83,13 @@ const loadRequest = async (req: Request): Promise<RequestLoaded> => {
 };
 
 async function handleRequest(reqOriginal: Request): Promise<Response> {
-  const req = await loadRequest(reqOriginal);
+  const requestUrl = getCanonicalUrl(reqOriginal);
 
   console.log(
-    `\n[${new Date().toISOString()}] ${req.method} ${req.url.host}${req.url.pathname}`,
+    `\n[${new Date().toISOString()}] ${reqOriginal.method} ${requestUrl.host}${requestUrl.pathname}`,
   );
 
-  for (const [key, value] of req.url.searchParams) {
+  for (const [key, value] of requestUrl.searchParams) {
     console.log(`  ? ${key}=${value}`);
   }
 
@@ -93,11 +98,11 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
   //   console.log(`    ${key}=${value}`);
   // }
 
-  const hostConfig = getHostConfig(req.url.host);
-  if (hostConfig?.git && isGitRequest(req.url)) {
+  const hostConfig = getHostConfig(requestUrl.host);
+  if (hostConfig?.git && isGitRequest(requestUrl)) {
     console.log("  → Git request detected, routing to git handler");
     try {
-      return await handleGitProxyRequest(req);
+      return await handleGitProxyRequest(reqOriginal);
     } catch (error) {
       console.error(`  → Git handler error: ${error}`);
       return new Response("Internal Server Error - Git request failed", {
@@ -105,6 +110,8 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
       });
     }
   }
+
+  const req = await loadRequest(reqOriginal);
 
   const secretConfig = findSecretConfigFromHeaders(req);
 

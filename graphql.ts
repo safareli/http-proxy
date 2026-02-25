@@ -548,7 +548,10 @@ function matchValueNode(pattern: ValueNode, request: ValueNode): boolean {
     case Kind.LIST: {
       const rList = request as typeof pattern;
       if (pattern.values.length !== rList.values.length) return false;
-      return pattern.values.every((pv, i) => matchValueNode(pv, rList.values[i]));
+      return pattern.values.every((pv, i) => {
+        const requestValue = rList.values[i];
+        return requestValue !== undefined && matchValueNode(pv, requestValue);
+      });
     }
     case Kind.OBJECT: {
       const rObj = request as typeof pattern;

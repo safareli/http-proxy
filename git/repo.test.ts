@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { GitHostConfig, RepoConfig } from "../git-config";
+import {
+  createUpstreamRepo as createUpstreamRepoShared,
+  pushCommitToUpstream as pushCommitToUpstreamShared,
+  runGitChecked as runGitCheckedShared,
+  type GitIdentity,
+  type GitRunOptions,
+} from "./assertions";
 import {
   getBareRepoPath,
   initializeRepo,
@@ -18,58 +19,23 @@ import {
 } from "./repo";
 import { git } from "./utils";
 
+const REPO_TEST_IDENTITY: GitIdentity = {
+  email: "tests@example.com",
+  name: "Repo Tests",
+};
+
 async function runGitChecked(
   args: string[],
-  options: {
-    cwd?: string;
-    env?: Record<string, string>;
-    fullEnv?: boolean;
-  } = {},
+  options: GitRunOptions = {},
 ): Promise<string> {
-  const result = await git(args, options);
-  if (!result.success) {
-    throw new Error(
-      `git ${args.join(" ")} failed (exit ${result.exitCode})\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-    );
-  }
-  return result.stdout.trim();
+  return runGitCheckedShared(git, args, options);
 }
 
 async function createUpstreamRepo(
   baseDir: string,
   name: string,
 ): Promise<string> {
-  const upstreamPath = join(baseDir, `${name}.git`);
-  const seedPath = join(baseDir, `${name}-seed`);
-
-  await runGitChecked(["init", "--bare", upstreamPath]);
-
-  mkdirSync(seedPath, { recursive: true });
-  await runGitChecked(["init"], { cwd: seedPath });
-  await runGitChecked(["config", "user.email", "tests@example.com"], {
-    cwd: seedPath,
-  });
-  await runGitChecked(["config", "user.name", "Repo Tests"], {
-    cwd: seedPath,
-  });
-
-  writeFileSync(join(seedPath, "README.md"), `# ${name}\n`);
-  await runGitChecked(["add", "."], { cwd: seedPath });
-  await runGitChecked(["commit", "-m", "initial commit"], { cwd: seedPath });
-  await runGitChecked(["branch", "-M", "main"], { cwd: seedPath });
-  await runGitChecked(["remote", "add", "origin", upstreamPath], {
-    cwd: seedPath,
-  });
-  await runGitChecked(["push", "-u", "origin", "main"], { cwd: seedPath });
-
-  // Ensure clones default to main.
-  await runGitChecked(["symbolic-ref", "HEAD", "refs/heads/main"], {
-    cwd: upstreamPath,
-  });
-
-  rmSync(seedPath, { recursive: true, force: true });
-
-  return upstreamPath;
+  return createUpstreamRepoShared(git, baseDir, name, REPO_TEST_IDENTITY);
 }
 
 async function pushCommitToUpstream(
@@ -78,31 +44,14 @@ async function pushCommitToUpstream(
   fileName: string,
   content: string,
 ): Promise<string> {
-  const workDir = join(
+  return pushCommitToUpstreamShared(
+    git,
     baseDir,
-    `push-work-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    upstreamPath,
+    fileName,
+    content,
+    REPO_TEST_IDENTITY,
   );
-
-  await runGitChecked(["clone", upstreamPath, workDir]);
-  await runGitChecked(["config", "user.email", "tests@example.com"], {
-    cwd: workDir,
-  });
-  await runGitChecked(["config", "user.name", "Repo Tests"], {
-    cwd: workDir,
-  });
-
-  writeFileSync(join(workDir, fileName), content);
-  await runGitChecked(["add", fileName], { cwd: workDir });
-  await runGitChecked(["commit", "-m", `update ${fileName}`], {
-    cwd: workDir,
-  });
-  await runGitChecked(["push", "origin", "main"], { cwd: workDir });
-
-  const newSha = await runGitChecked(["rev-parse", "HEAD"], { cwd: workDir });
-
-  rmSync(workDir, { recursive: true, force: true });
-
-  return newSha;
 }
 
 function createGitHostConfig(
@@ -156,11 +105,9 @@ describe("git/repo.ts", () => {
     expect(setupSshEnv(withoutKey)).toEqual({});
 
     const sshEnv = setupSshEnv(withKey);
-    expect(sshEnv.GIT_SSH_COMMAND).toContain("ssh -i /run/secrets/github-key");
-    expect(sshEnv.GIT_SSH_COMMAND).toContain(
-      "StrictHostKeyChecking=accept-new",
+    expect(sshEnv.GIT_SSH_COMMAND).toMatchInlineSnapshot(
+      '"ssh -i /run/secrets/github-key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"',
     );
-    expect(sshEnv.GIT_SSH_COMMAND).toContain("UserKnownHostsFile=/dev/null");
   });
 
   test("initializeRepo creates bare repo and configures upstream/fetch/head", async () => {
@@ -190,7 +137,12 @@ describe("git/repo.ts", () => {
     const refspecLines = fetchRefspecs
       .split("\n")
       .filter((line) => line.length > 0);
-    expect(refspecLines).toContain("+refs/heads/*:refs/heads/*");
+    expect(refspecLines).toMatchInlineSnapshot(`
+      [
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/heads/*:refs/heads/*",
+      ]
+    `);
 
     const receivePack = await runGitChecked(
       ["config", "--get", "http.receivepack"],
