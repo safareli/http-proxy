@@ -18,7 +18,12 @@ describe("git/utils.ts", () => {
 
       expect(result.success).toBe(true);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("git version");
+      const normalizedVersion = result.stdout
+        .trim()
+        .replace(/^git version .+$/, "git version <VERSION>");
+      expect(normalizedVersion).toMatchInlineSnapshot(
+        '"git version <VERSION>"',
+      );
     });
 
     test("inherits process.env by default", async () => {

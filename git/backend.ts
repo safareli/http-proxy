@@ -1,36 +1,55 @@
-interface GitBackendRequest {
+import { join } from "node:path";
+import {
+  getCanonicalGitPath,
+  parseGitRequest,
+  type ParsedGitRequest,
+} from "../git-config";
+
+export interface GitBackendRequest {
   method: string;
   url: URL;
   headers: Headers;
-  // TODO use ReadableStream so we don't have to load body in memory and can just pipe it
-  body: ArrayBuffer | null;
+  body: ReadableStream<Uint8Array> | null;
   reposRoot: string;
   canonicalPath: string;
 }
 
-function buildCgiEnv(req: GitBackendRequest): Record<string, string> {
-  // TODO extract this into a function and have a unit test for it
-  const scriptNameMatch = req.canonicalPath.match(/^(.+?\.git)(?:\/|$)/);
-  const scriptName = scriptNameMatch?.[1] ?? req.canonicalPath;
+export function extractScriptName(canonicalPath: string): string {
+  const scriptNameMatch = canonicalPath.match(/^(.+?\.git)(?:\/|$)/);
+  return scriptNameMatch?.[1] ?? canonicalPath;
+}
 
+export function getRepoPathFromCanonicalPath(
+  reposRoot: string,
+  canonicalPath: string,
+): string {
+  const scriptName = extractScriptName(canonicalPath).replace(/^\//, "");
+  return join(reposRoot, scriptName);
+}
+
+export function getServerPort(url: URL): string {
+  if (url.port) {
+    return url.port;
+  }
+  return url.protocol === "https:" ? "443" : "80";
+}
+
+export function buildCgiEnv(req: GitBackendRequest): Record<string, string> {
   const env: Record<string, string> = {
     REQUEST_METHOD: req.method,
-    QUERY_STRING: req.url.search.slice(1), // Remove leading ?
+    QUERY_STRING: req.url.search.slice(1),
     CONTENT_TYPE: req.headers.get("content-type") ?? "",
-    CONTENT_LENGTH:
-      req.headers.get("content-length") ??
-      // NOTE when body becomes stream we would only have length in headers
-      (req.body ? String(req.body.byteLength) : ""),
+    CONTENT_LENGTH: req.headers.get("content-length") ?? "",
     PATH_INFO: req.canonicalPath,
-    SCRIPT_NAME: scriptName,
+    SCRIPT_NAME: extractScriptName(req.canonicalPath),
     SERVER_NAME: req.url.hostname,
-    // TODO https url in upstream
-    SERVER_PORT: req.url.port || (req.url.protocol === "https:" ? "443" : "80"),
+    SERVER_PORT: getServerPort(req.url),
     SERVER_PROTOCOL: "HTTP/1.1",
     SERVER_SOFTWARE: "http-proxy/0.1",
     GATEWAY_INTERFACE: "CGI/1.1",
 
     // git-http-backend specific
+    // Keep this at repos root because PATH_INFO includes /owner/repo.git/...
     GIT_PROJECT_ROOT: req.reposRoot,
     GIT_HTTP_EXPORT_ALL: "1",
 
@@ -130,11 +149,11 @@ export async function executeGitHttpBackend(
   const env = buildCgiEnv(req);
 
   const gitHttpBackendPath = await findGitHttpBackend();
-  // TODO Stream request body directly to the process stdin
+  const repoPath = getRepoPathFromCanonicalPath(req.reposRoot, req.canonicalPath);
   const proc = Bun.spawn([gitHttpBackendPath], {
     env: { ...process.env, ...env },
-    cwd: req.reposRoot,
-    stdin: req.body ? new Uint8Array(req.body) : undefined,
+    cwd: repoPath,
+    stdin: req.body ?? undefined,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -207,16 +226,43 @@ async function findGitHttpBackend(): Promise<string> {
   );
 }
 
-// TODO should accept bun server's Request type and do canonicalization
+export interface CanonicalizedGitRequest {
+  method: string;
+  url: URL;
+  headers: Headers;
+  body: ReadableStream<Uint8Array> | null;
+  parsed: ParsedGitRequest;
+  canonicalPath: string;
+}
+
+export function canonicalizeIncomingRequest(
+  request: Request,
+): CanonicalizedGitRequest | null {
+  const url = new URL(request.url);
+  const host = request.headers.get("host") || url.host;
+  url.host = host;
+
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+
+  const parsed = parseGitRequest(url);
+  if (!parsed) {
+    return null;
+  }
+
+  return {
+    method: request.method,
+    url,
+    headers,
+    body: request.body,
+    parsed,
+    canonicalPath: getCanonicalGitPath(parsed),
+  };
+}
+
 export function createGitBackendRequest(
-  request: {
-    method: string;
-    url: URL;
-    headers: Headers;
-    body: ArrayBuffer | null;
-  },
+  request: CanonicalizedGitRequest,
   reposRoot: string,
-  canonicalPath: string,
 ): GitBackendRequest {
   return {
     method: request.method,
@@ -224,6 +270,6 @@ export function createGitBackendRequest(
     headers: request.headers,
     body: request.body,
     reposRoot,
-    canonicalPath,
+    canonicalPath: request.canonicalPath,
   };
 }

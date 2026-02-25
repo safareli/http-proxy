@@ -9,7 +9,11 @@ import {
   type RepoConfigInput,
 } from "./git-config";
 
-const CONFIG_FILE = "./proxy-config.json";
+const DEFAULT_CONFIG_FILE = "./proxy-config.json";
+
+function getConfigFilePath(): string {
+  return process.env.PROXY_CONFIG_PATH ?? DEFAULT_CONFIG_FILE;
+}
 
 const SecretConfigSchema = z.object({
   secret: z.string().min(1),
@@ -53,13 +57,14 @@ function formatZodErrors(error: z.ZodError): string {
 }
 
 export async function loadConfig(): Promise<void> {
-  const file = Bun.file(CONFIG_FILE);
+  const configFilePath = getConfigFilePath();
+  const file = Bun.file(configFilePath);
   if (await file.exists()) {
     const rawConfig = await file.json();
     const parsed = ProxyConfigSchema.safeParse(rawConfig);
     if (!parsed.success) {
       throw new Error(
-        `Invalid ${CONFIG_FILE}:\n${formatZodErrors(parsed.error)}`,
+        `Invalid ${configFilePath}:\n${formatZodErrors(parsed.error)}`,
       );
     }
     config = parsed.data;
@@ -76,7 +81,7 @@ export async function loadConfig(): Promise<void> {
 }
 
 export async function saveConfig(): Promise<void> {
-  await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
+  await Bun.write(getConfigFilePath(), JSON.stringify(config, null, 2) + "\n");
 }
 
 export function getConfig(): ProxyConfig {

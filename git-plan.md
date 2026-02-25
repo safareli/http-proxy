@@ -227,22 +227,22 @@ Simple, no port conflicts, no HTTP overhead, automatically scoped to localhost.
 **Files to modify:** `config.ts`
 **New files:** `git-config.ts`
 
-- [ ] Extend `HostConfig` with optional `git` field (Zod-validated)
-- [ ] Git config type: `{ ssh_key_path?, repos_dir, repos: Record<string, RepoConfig> }`
-- [ ] `RepoConfig`: `{ upstream, base_branch, allowed_push_branches, rejected_push_branches, protected_paths }`
-- [ ] Add `isGitRequest(url: URL): boolean` — checks URL pattern
-- [ ] Add `parseGitRequest(url: URL): { owner: string, repo: string, operation: "upload-pack" | "receive-pack", phase: "discovery" | "data" } | null`
-- [ ] Add save logic that persists git config changes (new repos, new branch patterns) to `proxy-config.json`
+- [x] Extend `HostConfig` with optional `git` field (Zod-validated)
+- [x] Git config type: `{ ssh_key_path?, repos_dir, repos: Record<string, RepoConfig> }`
+- [x] `RepoConfig`: `{ upstream, base_branch, allowed_push_branches, rejected_push_branches, protected_paths }`
+- [x] Add `isGitRequest(url: URL): boolean` — checks URL pattern
+- [x] Add `parseGitRequest(url: URL): { owner: string, repo: string, operation: "upload-pack" | "receive-pack", phase: "discovery" | "data" } | null`
+- [x] Add save logic that persists git config changes (new repos, new branch patterns) to `proxy-config.json`
 
 ### Phase 2: Git Backend Integration
 
 **Files to port/adapt from git-proxy:** `git-backend.ts`, `utils.ts` (git helpers, locking, glob matching)
 
-- [ ] Port `git-backend.ts` (CGI env building, git-http-backend execution, CGI response parsing) into http-proxy
-- [ ] Port git helper utilities: `git()`, `withLock()`, `matchesAnyPattern()`, `branchMatchesPattern()`
-- [ ] Port repo initialization logic: `initializeRepo()` (bare repo creation, remote setup, fetch refspec, HEAD setup)
-- [ ] Port SSH env setup from git-proxy (`setupSshEnv`)
-- [ ] Wire into proxy: when `isGitRequest()` matches, route to git handler instead of normal http flow
+- [x] Port `git-backend.ts` (CGI env building, git-http-backend execution, CGI response parsing) into http-proxy
+- [x] Port git helper utilities: `git()`, `withLock()`, `matchesAnyPattern()`, `branchMatchesPattern()`
+- [x] Port repo initialization logic: `initializeRepo()` (bare repo creation, remote setup, fetch refspec, HEAD setup)
+- [x] Port SSH env setup from git-proxy (`setupSshEnv`)
+- [x] Wire into proxy: when `isGitRequest()` matches, route to git handler instead of normal http flow
 
 ### Phase 3: Telegram Approval for Repo Access (Clone/Fetch)
 
