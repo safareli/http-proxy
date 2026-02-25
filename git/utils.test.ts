@@ -5,86 +5,13 @@ import {
   matchesAnyPattern,
   withLock,
 } from "./utils";
+import { setEnvVars } from "../test-utils/env";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function setWithUndo(
-  target: Record<string, string | undefined>,
-  values: Record<string, string | undefined>,
-): () => void {
-  const previous: Record<string, string | undefined> = {};
-  const existedBefore: Record<string, boolean> = {};
-
-  for (const [key, value] of Object.entries(values)) {
-    existedBefore[key] = Object.hasOwn(target, key);
-    previous[key] = target[key];
-
-    if (value === undefined) {
-      delete target[key];
-    } else {
-      target[key] = value;
-    }
-  }
-
-  return () => {
-    for (const key of Object.keys(values)) {
-      if (!existedBefore[key]) {
-        delete target[key];
-        continue;
-      }
-
-      target[key] = previous[key];
-    }
-  };
-}
-
-function setEnvVars(values: Record<string, string | undefined>): () => void {
-  return setWithUndo(process.env as Record<string, string | undefined>, values);
-}
-
 describe("git/utils.ts", () => {
-  describe("setWithUndo()", () => {
-    test("applies changes and undoes them", () => {
-      const target: Record<string, string | undefined> = {
-        A: "1",
-        B: "2",
-      };
-
-      const undo = setWithUndo(target, {
-        A: "10",
-        B: undefined,
-        C: "3",
-      });
-
-      expect(target).toEqual({ A: "10", C: "3" });
-      expect(Object.hasOwn(target, "B")).toBe(false);
-
-      undo();
-
-      expect(target).toEqual({ A: "1", B: "2" });
-      expect(Object.hasOwn(target, "C")).toBe(false);
-    });
-
-    test("restores keys that existed with undefined value", () => {
-      const target: Record<string, string | undefined> = {
-        UNDEFINED_KEY: undefined,
-      };
-
-      const undo = setWithUndo(target, {
-        UNDEFINED_KEY: "set",
-      });
-
-      expect(target.UNDEFINED_KEY).toBe("set");
-
-      undo();
-
-      expect(target.UNDEFINED_KEY).toBeUndefined();
-      expect(Object.hasOwn(target, "UNDEFINED_KEY")).toBe(true);
-    });
-  });
-
   describe("git()", () => {
     test("runs git commands", async () => {
       const result = await git(["--version"]);
