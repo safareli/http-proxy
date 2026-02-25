@@ -1,34 +1,68 @@
-import {
-  loadOpenApiSpec,
-  type OpenApiSpecConfig,
-} from "./openapi";
+import { z } from "zod";
+import { loadOpenApiSpec, type OpenApiSpecConfig } from "./openapi";
 import { matchesGraphQLFieldPattern } from "./graphql";
+import {
+  GitHostConfigSchema,
+  RepoConfigSchema,
+  type GitHostConfig,
+  type RepoConfig,
+  type RepoConfigInput,
+} from "./git-config";
 
 const CONFIG_FILE = "./proxy-config.json";
 
-export interface SecretConfig {
-  secret: string;
-  secretEnvVarName: string;
-  grants: string[];
-  rejections: string[];
-}
+const SecretConfigSchema = z.object({
+  secret: z.string().min(1),
+  secretEnvVarName: z.string().min(1),
+  grants: z.array(z.string()).default([]),
+  rejections: z.array(z.string()).default([]),
+});
 
-export interface HostConfig {
-  secrets: SecretConfig[];
-  graphqlEndpoints?: string[];
-  openApiSpec?: OpenApiSpecConfig;
-}
+// TODO move to openapi.ts and derive OpenApiSpecConfig from schema
+const OpenApiSpecConfigSchema: z.ZodType<OpenApiSpecConfig> = z
+  .object({
+    url: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+  })
+  .refine((value) => value.url || value.path, {
+    message: "openApiSpec requires either url or path",
+  });
 
-export interface ProxyConfig {
-  [host: string]: HostConfig;
-}
+const HostConfigSchema = z.object({
+  secrets: z.array(SecretConfigSchema).default([]),
+  graphqlEndpoints: z.array(z.string()).optional(),
+  openApiSpec: OpenApiSpecConfigSchema.optional(),
+  git: GitHostConfigSchema.optional(),
+});
+
+const ProxyConfigSchema = z.record(z.string(), HostConfigSchema);
+
+export type SecretConfig = z.infer<typeof SecretConfigSchema>;
+export type HostConfig = z.infer<typeof HostConfigSchema>;
+export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
 
 let config: ProxyConfig = {};
+
+function formatZodErrors(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+      return `  - ${path}: ${issue.message}`;
+    })
+    .join("\n");
+}
 
 export async function loadConfig(): Promise<void> {
   const file = Bun.file(CONFIG_FILE);
   if (await file.exists()) {
-    config = await file.json();
+    const rawConfig = await file.json();
+    const parsed = ProxyConfigSchema.safeParse(rawConfig);
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid ${CONFIG_FILE}:\n${formatZodErrors(parsed.error)}`,
+      );
+    }
+    config = parsed.data;
   } else {
     config = {};
   }
@@ -47,6 +81,71 @@ export async function saveConfig(): Promise<void> {
 
 export function getConfig(): ProxyConfig {
   return config;
+}
+
+export function getHostConfig(host: string): HostConfig | null {
+  return config[host] ?? null;
+}
+
+export function getGitHostConfig(host: string): GitHostConfig | null {
+  return config[host]?.git ?? null;
+}
+
+export function getGitRepoConfig(
+  host: string,
+  repoKey: string,
+): RepoConfig | null {
+  return config[host]?.git?.repos[repoKey] ?? null;
+}
+
+export async function setGitRepoConfig(
+  host: string,
+  repoKey: string,
+  repoConfig: RepoConfigInput,
+): Promise<void> {
+  const hostGitConfig = config[host]?.git;
+  if (!hostGitConfig) {
+    throw new Error(`Host ${host} does not have git configuration`);
+  }
+
+  hostGitConfig.repos[repoKey] = RepoConfigSchema.parse(repoConfig);
+  await saveConfig();
+}
+
+export async function addGitAllowedPushBranch(
+  host: string,
+  repoKey: string,
+  pattern: string,
+): Promise<void> {
+  const repoConfig = config[host]?.git?.repos[repoKey];
+  if (!repoConfig) {
+    throw new Error(`Repo ${repoKey} is not configured for host ${host}`);
+  }
+
+  if (repoConfig.allowed_push_branches.includes(pattern)) {
+    return;
+  }
+
+  repoConfig.allowed_push_branches.push(pattern);
+  await saveConfig();
+}
+
+export async function addGitRejectedPushBranch(
+  host: string,
+  repoKey: string,
+  pattern: string,
+): Promise<void> {
+  const repoConfig = config[host]?.git?.repos[repoKey];
+  if (!repoConfig) {
+    throw new Error(`Repo ${repoKey} is not configured for host ${host}`);
+  }
+
+  if (repoConfig.rejected_push_branches.includes(pattern)) {
+    return;
+  }
+
+  repoConfig.rejected_push_branches.push(pattern);
+  await saveConfig();
 }
 
 export function getRequestKey(method: string, path: string): string {
@@ -104,7 +203,9 @@ export function matchesPattern(pattern: string, requestKey: string): boolean {
     const requestOpIdx = requestRest.indexOf(" ");
     if (patternOpIdx === -1 || requestOpIdx === -1) return false;
 
-    if (patternRest.slice(0, patternOpIdx) !== requestRest.slice(0, requestOpIdx)) {
+    if (
+      patternRest.slice(0, patternOpIdx) !== requestRest.slice(0, requestOpIdx)
+    ) {
       return false;
     }
     return matchesGraphQLFieldPattern(

@@ -17,7 +17,7 @@ export interface PatternOption {
   pattern: string;
   description: string;
 }
-
+// TODO derive this type from OpenApiSpecConfigSchema
 export interface OpenApiSpecConfig {
   url?: string;
   path?: string;
