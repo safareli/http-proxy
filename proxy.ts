@@ -1,6 +1,7 @@
 import {
   loadConfig,
   getConfig,
+  getHostConfig,
   getRequestKey,
   findMatchingGrant,
   findMatchingRejection,
@@ -28,6 +29,8 @@ import {
   generatePatternOptions,
   type PatternOption,
 } from "./openapi";
+import { isGitRequest } from "./git-config";
+import { handleGitRequest as handleGitProxyRequest } from "./git/handler";
 
 export type ApprovalResponse =
   | { type: "allow-once" }
@@ -89,6 +92,19 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
   // for (const [key, value] of req.headers) {
   //   console.log(`    ${key}=${value}`);
   // }
+
+  const hostConfig = getHostConfig(req.url.host);
+  if (hostConfig?.git && isGitRequest(req.url)) {
+    console.log("  → Git request detected, routing to git handler");
+    try {
+      return await handleGitProxyRequest(req);
+    } catch (error) {
+      console.error(`  → Git handler error: ${error}`);
+      return new Response("Internal Server Error - Git request failed", {
+        status: 500,
+      });
+    }
+  }
 
   const secretConfig = findSecretConfigFromHeaders(req);
 
