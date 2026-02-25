@@ -19,7 +19,10 @@ import {
   type GitIdentity,
   type GitRunOptions,
 } from "./assertions";
-import { handleGitRequest } from "./handler";
+import {
+  handleGitRequest,
+  type GitRequestDependencies,
+} from "./handler";
 import { git, type GitResult } from "./utils";
 
 const E2E_IDENTITY: GitIdentity = {
@@ -128,6 +131,7 @@ function normalizeOutput(output: string, ctx: E2EContext): string {
 
 describe("git e2e", () => {
   let ctx: E2EContext;
+  let gitRequestDependencies: GitRequestDependencies | undefined;
 
   beforeEach(async () => {
     const tmp = mkdtempSync(join(tmpdir(), "http-proxy-git-e2e-"));
@@ -137,9 +141,11 @@ describe("git e2e", () => {
     const configPath = join(tmp, "proxy-config.json");
     const restoreEnv = setEnvVars({ PROXY_CONFIG_PATH: configPath });
 
+    gitRequestDependencies = undefined;
+
     const server = Bun.serve({
       port: 0,
-      fetch: handleGitRequest,
+      fetch: (request) => handleGitRequest(request, gitRequestDependencies),
     });
 
     const port = server.port;
@@ -255,6 +261,75 @@ describe("git e2e", () => {
       fatal: repository 'http://localhost:<PORT>/owner/unknown.git/' not found
       "
     `);
+  });
+
+  test("unknown repo can be approved for clone/fetch and persisted", async () => {
+    const repoKey = "owner/newly-approved";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-approved-repo",
+    );
+
+    await configureProxy(ctx, {});
+
+    let approvalCalls = 0;
+    gitRequestDependencies = {
+      requestReadApproval: async (host, requestedRepoKey) => {
+        approvalCalls += 1;
+        expect(host).toBe(ctx.host);
+        expect(requestedRepoKey).toBe(repoKey);
+        return { type: "allow-forever" };
+      },
+      createRepoConfigOnApproval: () => createRepoConfig(upstreamPath),
+    };
+
+    const cloneDir = join(ctx.tmpDir, "client-approved");
+    const cloneResult = await cloneRepo(ctx.port, `${repoKey}.git`, cloneDir);
+
+    expect(cloneResult.success).toBe(true);
+    expect(approvalCalls).toBe(1);
+    expect(existsSync(join(cloneDir, "README.md"))).toBe(true);
+    expect(existsSync(join(ctx.reposDir, `${repoKey}.git`))).toBe(true);
+
+    const savedConfig = (await Bun.file(ctx.configPath).json()) as {
+      [host: string]: {
+        git?: {
+          repos?: Record<string, RepoConfig>;
+        };
+      };
+    };
+
+    expect(savedConfig[ctx.host]?.git?.repos?.[repoKey]).toEqual(
+      createRepoConfig(upstreamPath),
+    );
+  });
+
+  test("unknown repo approval reject-once blocks clone and does not persist", async () => {
+    const repoKey = "owner/rejected";
+    await configureProxy(ctx, {});
+
+    gitRequestDependencies = {
+      requestReadApproval: async () => ({ type: "reject-once" }),
+    };
+
+    const cloneDir = join(ctx.tmpDir, "client-rejected");
+    const cloneResult = await cloneRepo(ctx.port, `${repoKey}.git`, cloneDir);
+
+    expect(cloneResult.success).toBe(false);
+    expect(cloneResult.stderr).toContain("Clone/fetch request rejected");
+    expect(cloneResult.stderr).toContain(
+      "The requested URL returned error: 403",
+    );
+
+    const savedConfig = (await Bun.file(ctx.configPath).json()) as {
+      [host: string]: {
+        git?: {
+          repos?: Record<string, RepoConfig>;
+        };
+      };
+    };
+
+    expect(savedConfig[ctx.host]?.git?.repos?.[repoKey]).toBeUndefined();
   });
 
   test("push is currently rejected (receive-pack not enabled yet)", async () => {
