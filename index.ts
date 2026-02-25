@@ -2,7 +2,9 @@ import { Bot, InlineKeyboard } from "grammy";
 import {
   startProxy,
   setRequestApprovalHandler,
+  setGitReadApprovalHandler,
   type ApprovalResponse,
+  type GitReadApprovalResponse,
   type PatternOption,
 } from "./proxy";
 
@@ -18,15 +20,20 @@ if (!ownerId) {
 
 const APPROVAL_TIMEOUT_MS = 255 * 1000; // ~4 minutes (Bun max idleTimeout)
 
-interface PendingRequest {
-  resolve: (response: ApprovalResponse) => void;
+interface PendingRequest<TResponse extends { type: string }> {
+  resolve: (response: TResponse) => void;
   timeout: Timer;
   callbackKeys: string[];
+  rejectOnce: Extract<TResponse, { type: "reject-once" }>;
   messageId?: number;
   abortedByClient?: boolean;
 }
 
-const pendingRequests = new Map<string, PendingRequest>();
+type AnyPendingRequest =
+  | PendingRequest<ApprovalResponse>
+  | PendingRequest<GitReadApprovalResponse>;
+
+const pendingRequests = new Map<string, AnyPendingRequest>();
 let requestIdCounter = 0;
 
 function code(text: string): string {
@@ -98,15 +105,16 @@ function requestApproval(
   return new Promise<ApprovalResponse>((resolveRaw) => {
     const requestId = String(++requestIdCounter);
 
-    const pendingRequest: PendingRequest = {
+    const pendingRequest: PendingRequest<ApprovalResponse> = {
       callbackKeys: [],
-      resolve: (res: ApprovalResponse) => {
+      rejectOnce: { type: "reject-once" },
+      resolve: (res) => {
         cleanupRequest(requestId);
         resolveRaw(res);
       },
       timeout: setTimeout(() => {
         console.log(`Request ${requestId} timed out`);
-        pendingRequest.resolve({ type: "reject-once" });
+        pendingRequest.resolve(pendingRequest.rejectOnce);
       }, APPROVAL_TIMEOUT_MS),
     };
     pendingRequests.set(requestId, pendingRequest);
@@ -116,7 +124,7 @@ function requestApproval(
       if (!pendingRequests.has(requestId)) return;
       console.log(`Request ${requestId} aborted (client disconnected)`);
       pendingRequest.abortedByClient = true;
-      pendingRequest.resolve({ type: "reject-once" });
+      pendingRequest.resolve(pendingRequest.rejectOnce);
       if (pendingRequest.messageId) {
         bot.api
           .editMessageText(
@@ -150,7 +158,7 @@ function requestApproval(
       );
     });
     const onOnceReject = reg(`once:reject:${requestId}`, async (ctx) => {
-      pendingRequest.resolve({ type: "reject-once" });
+      pendingRequest.resolve(pendingRequest.rejectOnce);
       await ctx.answerCallbackQuery({ text: "Rejected (once)" });
       await ctx.editMessageText(
         `✗ Rejected (once):\n\n${method} ${host}\n${code(path)}`,
@@ -232,7 +240,107 @@ function requestApproval(
       })
       .catch((err) => {
         console.error("Failed to send approval request:", err);
-        pendingRequest.resolve({ type: "reject-once" });
+        pendingRequest.resolve(pendingRequest.rejectOnce);
+      });
+  });
+}
+
+function requestGitReadApproval(
+  host: string,
+  repoKey: string,
+  signal: AbortSignal,
+): Promise<GitReadApprovalResponse> {
+  return new Promise<GitReadApprovalResponse>((resolveRaw) => {
+    const requestId = String(++requestIdCounter);
+
+    const pendingRequest: PendingRequest<GitReadApprovalResponse> = {
+      callbackKeys: [],
+      rejectOnce: { type: "reject-once" },
+      resolve: (res) => {
+        cleanupRequest(requestId);
+        resolveRaw(res);
+      },
+      timeout: setTimeout(() => {
+        console.log(`Git read request ${requestId} timed out`);
+        pendingRequest.resolve(pendingRequest.rejectOnce);
+      }, APPROVAL_TIMEOUT_MS),
+    };
+
+    pendingRequests.set(requestId, pendingRequest);
+
+    const onAbort = () => {
+      if (!pendingRequests.has(requestId)) return;
+      console.log(`Git read request ${requestId} aborted (client disconnected)`);
+      pendingRequest.abortedByClient = true;
+      pendingRequest.resolve(pendingRequest.rejectOnce);
+      if (pendingRequest.messageId) {
+        bot.api
+          .editMessageText(
+            Number(ownerId),
+            pendingRequest.messageId,
+            `⊘ Auto-closed (client disconnected):\n\nClone/fetch ${code(repoKey)}\nHost: ${code(host)}`,
+            { parse_mode: "HTML" },
+          )
+          .catch(() => {});
+      }
+    };
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const reg = (key: string, handler: (ctx: any) => Promise<void>): string => {
+      pendingRequest.callbackKeys.push(key);
+      return registerCallback(key, handler);
+    };
+
+    const onAllowForever = reg(`git:allow:${requestId}`, async (ctx) => {
+      pendingRequest.resolve({ type: "allow-forever" });
+      await ctx.answerCallbackQuery({ text: "Clone/fetch allowed forever" });
+      await ctx.editMessageText(
+        `✓ Clone/fetch approved forever:\n\n${code(repoKey)}\nHost: ${code(host)}`,
+        { parse_mode: "HTML" },
+      );
+    });
+
+    const onRejectOnce = reg(`git:reject:${requestId}`, async (ctx) => {
+      pendingRequest.resolve(pendingRequest.rejectOnce);
+      await ctx.answerCallbackQuery({ text: "Clone/fetch rejected" });
+      await ctx.editMessageText(
+        `✗ Clone/fetch rejected:\n\n${code(repoKey)}\nHost: ${code(host)}`,
+        { parse_mode: "HTML" },
+      );
+    });
+
+    const keyboard = new InlineKeyboard()
+      .text("✓ Allow forever", onAllowForever)
+      .text("✗ Reject once", onRejectOnce);
+
+    const msg = `🔒 Allow cloning ${code(repoKey)}?\n\nHost: ${code(host)}`;
+
+    bot.api
+      .sendMessage(Number(ownerId), msg, {
+        reply_markup: keyboard,
+        parse_mode: "HTML",
+      })
+      .then((sent) => {
+        pendingRequest.messageId = sent.message_id;
+        if (pendingRequest.abortedByClient) {
+          bot.api
+            .editMessageText(
+              Number(ownerId),
+              sent.message_id,
+              `⊘ Auto-closed (client disconnected):\n\nClone/fetch ${code(repoKey)}\nHost: ${code(host)}`,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to send git read approval request:", err);
+        pendingRequest.resolve(pendingRequest.rejectOnce);
       });
   });
 }
@@ -241,7 +349,7 @@ const shutdown = () => {
   console.log("Shutting down gracefully...");
   for (const [, pending] of pendingRequests) {
     clearTimeout(pending.timeout);
-    pending.resolve({ type: "reject-once" });
+    pending.resolve(pending.rejectOnce);
   }
   callbackHandlers.clear();
   pendingRequests.clear();
@@ -253,6 +361,7 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 setRequestApprovalHandler(requestApproval);
+setGitReadApprovalHandler(requestGitReadApproval);
 
 console.log("Starting bot and proxy...");
 

@@ -30,7 +30,11 @@ import {
   type PatternOption,
 } from "./openapi";
 import { isGitRequest } from "./git-config";
-import { handleGitRequest as handleGitProxyRequest } from "./git/handler";
+import {
+  handleGitRequest as handleGitProxyRequest,
+  type GitReadApprovalFn,
+  type GitReadApprovalResponse,
+} from "./git/handler";
 
 export type ApprovalResponse =
   | { type: "allow-once" }
@@ -38,7 +42,7 @@ export type ApprovalResponse =
   | { type: "reject-once" }
   | { type: "reject-forever"; pattern: string };
 
-export type { PatternOption };
+export type { PatternOption, GitReadApprovalResponse };
 
 export type RequestApprovalFn = (
   host: string,
@@ -49,9 +53,14 @@ export type RequestApprovalFn = (
 ) => Promise<ApprovalResponse>;
 
 let requestApprovalFn: RequestApprovalFn | null = null;
+let requestGitReadApprovalFn: GitReadApprovalFn | null = null;
 
 export function setRequestApprovalHandler(fn: RequestApprovalFn): void {
   requestApprovalFn = fn;
+}
+
+export function setGitReadApprovalHandler(fn: GitReadApprovalFn): void {
+  requestGitReadApprovalFn = fn;
 }
 
 type RequestLoaded = {
@@ -102,7 +111,9 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
   if (hostConfig?.git && isGitRequest(requestUrl)) {
     console.log("  → Git request detected, routing to git handler");
     try {
-      return await handleGitProxyRequest(reqOriginal);
+      return await handleGitProxyRequest(reqOriginal, {
+        requestReadApproval: requestGitReadApprovalFn,
+      });
     } catch (error) {
       console.error(`  → Git handler error: ${error}`);
       return new Response("Internal Server Error - Git request failed", {

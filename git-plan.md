@@ -248,14 +248,14 @@ Simple, no port conflicts, no HTTP overhead, automatically scoped to localhost.
 
 **Files to modify:** `proxy.ts`, `index.ts`
 
-- [ ] In the git handler, before serving a clone/fetch:
+- [x] In the git handler, before serving a clone/fetch:
   - If repo is in config → proceed (fetch from upstream, serve)
   - If repo is **not** in config → trigger Telegram approval
-- [ ] Telegram message: "Allow cloning `owner/repo`?" with buttons:
+- [x] Telegram message: "Allow cloning `owner/repo`?" with buttons:
   - `[✓ Allow forever]` — creates config entry, initializes repo, proceeds
   - `[✗ Reject once]` — returns error to git client
-- [ ] On "Allow forever": create repo entry in config, call `initializeRepo()`, save config, proceed with clone
-- [ ] Handle timeout (~4 min) → reject
+- [x] On "Allow forever": create repo entry in config, call `initializeRepo()`, save config, proceed with clone
+- [x] Handle timeout (~4 min) → reject
 
 ### Phase 4: Pre-receive Hook with Telegram Approval for Pushes
 
