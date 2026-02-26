@@ -39,3 +39,4 @@ proxy-config.json
 
 # OpenAPI spec cache
 .openapi-cache/
+git-repos
