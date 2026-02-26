@@ -344,6 +344,68 @@ describe("git e2e", () => {
     expect(fetchedSha).toBe(upstreamNewSha);
   });
 
+  test("push works when repos_dir is ./git-repos", async () => {
+    const repoKey = "owner/relative-dot-git-repos";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-relative-dot-git-repos",
+    );
+
+    const originalCwd = process.cwd();
+    process.chdir(ctx.tmpDir);
+
+    try {
+      await Bun.write(
+        ctx.configPath,
+        JSON.stringify(
+          {
+            [ctx.host]: {
+              git: {
+                repos_dir: "./git-repos",
+                repos: {
+                  [repoKey]: {
+                    ...createRepoConfig(upstreamPath),
+                    allowed_push_branches: ["agent/*"],
+                  },
+                },
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      await loadConfig();
+
+      const cloneDir = await cloneRepoAndConfigureIdentity(
+        ctx,
+        `${repoKey}.git`,
+        "client-relative-dot-git-repos",
+      );
+
+      await runGitChecked(["checkout", "-b", "agent/relative-dot-git-repos"], {
+        cwd: cloneDir,
+      });
+      await commitFile(
+        cloneDir,
+        "relative-dot-git-repos.txt",
+        "ok\n",
+        "test ./git-repos",
+      );
+
+      const pushResult = await runGit(
+        ["push", "origin", "agent/relative-dot-git-repos"],
+        {
+          cwd: cloneDir,
+        },
+      );
+
+      expect(pushResult.success).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   test("unknown repo is rejected", async () => {
     const upstreamPath = await createUpstreamRepo(ctx.tmpDir, "upstream-known");
 
