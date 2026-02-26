@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import {
   GitHostConfigSchema,
@@ -706,9 +706,17 @@ async function loadHookRuntimeConfig(
     throw new Error(`Host is not configured for git hook approval: ${host}`);
   }
 
-  const gitConfig = GitHostConfigSchema.parse(
+  const parsedGitConfig = GitHostConfigSchema.parse(
     (hostConfig as { git?: unknown }).git,
   );
+
+  // Resolve repos_dir relative to the config file location, not the hook cwd.
+  // Hooks run with cwd inside the bare repo, so plain "./git-repos" would
+  // otherwise resolve to "<repo>.git/git-repos" and break git subprocesses.
+  const gitConfig: GitHostConfig = {
+    ...parsedGitConfig,
+    repos_dir: resolve(dirname(configPath), parsedGitConfig.repos_dir),
+  };
 
   const repoConfig = RepoConfigSchema.parse(gitConfig.repos[repoKey]);
 
