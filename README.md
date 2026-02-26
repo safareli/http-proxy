@@ -1,6 +1,9 @@
 # http-proxy
 
-HTTPS MITM proxy with Telegram approval flow. Intercepts requests, detects secret tokens, and requires Telegram approval before forwarding sensitive requests.
+HTTPS MITM proxy with Telegram approval flow.
+
+- HTTP/GraphQL mode: intercepts requests carrying fake secrets and asks for approval before substituting and forwarding.
+- Git mode: intercepts Git smart-HTTP traffic for configured hosts (for example `github.com`), asks for clone/fetch/push approval, and syncs local bare repos with upstream via SSH.
 
 Uses glob-based pattern matching for both HTTP and GraphQL requests to permanently grant or reject request patterns.
 
@@ -47,15 +50,32 @@ Create a `.env` file:
 ```bash
 TELEGRAM_API_TOKEN=your_bot_token
 TELEGRAM_OWNER_ID=your_telegram_user_id
-REAL_GITHUB_TOKEN=your_actual_github_token
+GH_TOKEN=your_actual_github_token
 # Add other real secrets as needed
 ```
 
 ### 5. Configure proxy hosts
 
-Edit `proxy-config.json` to add hosts you want to intercept. See [Configuration](#configuration) below for the full format.
+Edit `proxy-config.json` to add hosts you want to intercept.
 
-### 6. Configure /etc/hosts in your machine
+If you use both GitHub API and Git traffic, configure both:
+
+- `api.github.com` (HTTP/GraphQL secrets flow)
+- `github.com` (git smart-HTTP flow under `git` config)
+
+See [Configuration](#configuration) below for the full format.
+
+### 6. Configure /etc/hosts in your machine/VM
+
+Point every configured host to the proxy IP. For local development this is typically `127.0.0.1`:
+
+```bash
+# /etc/hosts
+127.0.0.1 api.github.com
+127.0.0.1 github.com
+```
+
+If the proxy runs on a different machine/container, use that machine's IP instead.
 
 ### 7. Run the proxy
 
@@ -74,7 +94,7 @@ The proxy listens on:
 - Port 80 (HTTP)
 - Port 443 (HTTPS)
 
-## How it works
+## How it works (HTTP/GraphQL secret flow)
 
 1. Request arrives at proxy
 2. Scans all header values for the host's fake secret
@@ -88,6 +108,28 @@ The proxy listens on:
    - Hold request until user responds (~4 min timeout → 403)
    - If approved: substitute secret, forward to upstream
    - If rejected: return 403
+
+## How it works (Git flow)
+
+For hosts with a `git` config section, git smart-HTTP paths are routed to the git handler:
+
+- clone/fetch discovery and data (`git-upload-pack`)
+- push discovery and data (`git-receive-pack`)
+
+Flow summary:
+
+1. Parse `owner/repo` from request URL (`/owner/repo.git/...` or `/owner/repo/...`).
+2. If repo is unknown and operation is clone/fetch, send Telegram approval:
+   - `✓ Allow forever` persists repo config and initializes local bare repo.
+   - `✗ Reject once` returns 403.
+3. Sync local bare repo from upstream before serving reads.
+4. Pushes run pre-receive validation + approvals:
+   - protected paths are rejected immediately (no Telegram)
+   - tag push: one-time approval only
+   - branch deletion: one-time approval only
+   - force push: one-time approval only
+   - normal branch push: can be approved once or persisted as branch/pattern grant/rejection
+5. Approved pushes are forwarded from proxy bare repo to upstream via SSH.
 
 ## Configuration
 
@@ -111,19 +153,42 @@ The proxy listens on:
         "rejections": []
       }
     ]
+  },
+  "github.com": {
+    "secrets": [],
+    "git": {
+      "ssh_key_path": "/run/secrets/github-deploy-key",
+      "repos_dir": "./git-repos",
+      "repos": {
+        "owner/repo": {
+          "upstream": "git@github.com:owner/repo.git",
+          "base_branch": "main",
+          "allowed_push_branches": ["agent/*"],
+          "rejected_push_branches": ["main"],
+          "protected_paths": [".github/**", "*.nix"]
+        }
+      }
+    }
   }
 }
 ```
 
-| Field                        | Description                                                     |
-| ---------------------------- | --------------------------------------------------------------- |
-| `secrets[].secret`           | The fake token your VM uses in requests                         |
-| `secrets[].secretEnvVarName` | Env var containing the real token                               |
-| `secrets[].grants`           | Patterns for permanently allowed requests                       |
-| `secrets[].rejections`       | Patterns for permanently blocked requests                       |
-| `graphqlEndpoints`           | Paths treated as GraphQL endpoints (e.g. `["/graphql"]`)        |
-| `openApiSpec.url`            | URL to fetch an OpenAPI spec from (cached in `.openapi-cache/`) |
-| `openApiSpec.path`           | Local file path to an OpenAPI spec                              |
+| Field                                     | Description                                                     |
+| ----------------------------------------- | --------------------------------------------------------------- |
+| `secrets[].secret`                        | The fake token your VM uses in requests                         |
+| `secrets[].secretEnvVarName`              | Env var containing the real token                               |
+| `secrets[].grants`                        | Patterns for permanently allowed requests                       |
+| `secrets[].rejections`                    | Patterns for permanently blocked requests                       |
+| `graphqlEndpoints`                        | Paths treated as GraphQL endpoints (e.g. `["/graphql"]`)        |
+| `openApiSpec.url`                         | URL to fetch an OpenAPI spec from (cached in `.openapi-cache/`) |
+| `openApiSpec.path`                        | Local file path to an OpenAPI spec                              |
+| `git.ssh_key_path`                        | Optional SSH key path used for upstream fetch/push              |
+| `git.repos_dir`                           | Directory for local bare repos and hook socket                  |
+| `git.repos.<owner/repo>.upstream`         | Upstream SSH remote for that repo                               |
+| `git.repos.<owner/repo>.base_branch`      | Base/default branch (used for HEAD + branch safety options)     |
+| `git.repos.<owner/repo>.allowed_push_branches`  | Persisted allowed branch patterns                               |
+| `git.repos.<owner/repo>.rejected_push_branches` | Persisted rejected branch patterns                              |
+| `git.repos.<owner/repo>.protected_paths`  | Protected glob paths (immediate reject, no Telegram)            |
 
 ## HTTP pattern matching
 
@@ -292,7 +357,15 @@ When a request needs approval, you receive a Telegram message with these buttons
 - **✗ Forever** - Expands to show pattern options for permanent rejection
 - **✓ \<pattern\>** - Allow forever using the shown pattern (saves to `grants` in config)
 
-"Forever" choices persist the pattern to `proxy-config.json`, so matching requests are automatically allowed/rejected on future runs.
+### Git approval variants
+
+- **Clone/fetch unknown repo**: `✓ Allow forever` / `✗ Reject once`
+- **Branch push**: `✓ Once`, `✗ Once`, `✗ Forever ▸`, and pattern grants like `✓ agent/*`, `✓ * (except main)`, `✓ *`
+- **Tag push**: one-time approval only (`✓ Once` / `✗ Once`)
+- **Branch deletion**: one-time approval only (`✓ Once` / `✗ Once`)
+- **Force push**: one-time approval only (`✓ Once` / `✗ Once`)
+
+"Forever" choices persist to `proxy-config.json` (`secrets[].grants/rejections` for HTTP/GraphQL, `git.repos.*.allowed_push_branches/rejected_push_branches` for git).
 
 Requests time out after ~4 minutes (255s, Bun's max `idleTimeout`) and are auto-rejected.
 

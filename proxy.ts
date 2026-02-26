@@ -7,6 +7,9 @@ import {
   findMatchingRejection,
   addGrant,
   addRejection,
+  addGitAllowedPushBranch,
+  addGitRejectedPushBranch,
+  getGitRepoConfig,
   getRealSecret,
   findSecretConfigFromHeaders,
   substituteSecretInHeaders,
@@ -35,12 +38,33 @@ import {
   type GitReadApprovalFn,
   type GitReadApprovalResponse,
 } from "./git/handler";
+import {
+  getHookSocketPath,
+  startHookSocketServer,
+  type HookApprovalRequest,
+  type HookApprovalResponse,
+  type HookSocketServer,
+} from "./git/hook-socket";
 
 export type ApprovalResponse =
   | { type: "allow-once" }
   | { type: "allow-forever"; pattern: string }
   | { type: "reject-once" }
   | { type: "reject-forever"; pattern: string };
+
+export interface GitPushApprovalRequest {
+  host: string;
+  repo: string;
+  type: HookApprovalRequest["type"];
+  ref: string;
+  baseBranch?: string;
+}
+
+export type GitPushApprovalResponse =
+  | { type: "allow-once" }
+  | { type: "allow-pattern"; pattern: string; rejectBaseBranch?: string }
+  | { type: "reject-once" }
+  | { type: "reject-pattern"; pattern: string };
 
 export type { PatternOption, GitReadApprovalResponse };
 
@@ -52,8 +76,16 @@ export type RequestApprovalFn = (
   signal: AbortSignal,
 ) => Promise<ApprovalResponse>;
 
+export type GitPushApprovalFn = (
+  request: GitPushApprovalRequest,
+  signal: AbortSignal,
+) => Promise<GitPushApprovalResponse>;
+
 let requestApprovalFn: RequestApprovalFn | null = null;
 let requestGitReadApprovalFn: GitReadApprovalFn | null = null;
+let requestGitPushApprovalFn: GitPushApprovalFn | null = null;
+
+const gitHookSocketServers = new Map<string, HookSocketServer>();
 
 export function setRequestApprovalHandler(fn: RequestApprovalFn): void {
   requestApprovalFn = fn;
@@ -61,6 +93,10 @@ export function setRequestApprovalHandler(fn: RequestApprovalFn): void {
 
 export function setGitReadApprovalHandler(fn: GitReadApprovalFn): void {
   requestGitReadApprovalFn = fn;
+}
+
+export function setGitPushApprovalHandler(fn: GitPushApprovalFn): void {
+  requestGitPushApprovalFn = fn;
 }
 
 type RequestLoaded = {
@@ -90,6 +126,149 @@ const loadRequest = async (req: Request): Promise<RequestLoaded> => {
       : null;
   return { url, method: req.method, headers, body, signal: req.signal };
 };
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function handleGitHookSocketApproval(
+  request: HookApprovalRequest,
+  signal: AbortSignal,
+): Promise<HookApprovalResponse> {
+  const repoConfig = getGitRepoConfig(request.host, request.repo);
+  if (!repoConfig) {
+    return {
+      allowed: false,
+      error: `Unknown git repo ${request.repo} for host ${request.host}`,
+    };
+  }
+
+  if (!requestGitPushApprovalFn) {
+    return {
+      allowed: false,
+      error: "No git push approval handler configured",
+    };
+  }
+
+  let decision: GitPushApprovalResponse;
+  try {
+    decision = await requestGitPushApprovalFn(
+      {
+        host: request.host,
+        repo: request.repo,
+        type: request.type,
+        ref: request.ref,
+        baseBranch: request.baseBranch,
+      },
+      signal,
+    );
+  } catch (error) {
+    return {
+      allowed: false,
+      error: `Push approval failed: ${toErrorMessage(error)}`,
+    };
+  }
+
+  switch (decision.type) {
+    case "allow-once":
+      return { allowed: true };
+
+    case "reject-once":
+      return { allowed: false };
+
+    case "allow-pattern": {
+      const addAllowedPatterns = [decision.pattern];
+      const addRejectedPatterns: string[] = [];
+
+      try {
+        await addGitAllowedPushBranch(request.host, request.repo, decision.pattern);
+
+        if (decision.rejectBaseBranch) {
+          await addGitRejectedPushBranch(
+            request.host,
+            request.repo,
+            decision.rejectBaseBranch,
+          );
+          addRejectedPatterns.push(decision.rejectBaseBranch);
+        }
+      } catch (error) {
+        return {
+          allowed: false,
+          error: `Failed to persist branch approval: ${toErrorMessage(error)}`,
+        };
+      }
+
+      return {
+        allowed: true,
+        addAllowedPatterns,
+        ...(addRejectedPatterns.length > 0 ? { addRejectedPatterns } : {}),
+      };
+    }
+
+    case "reject-pattern": {
+      try {
+        await addGitRejectedPushBranch(request.host, request.repo, decision.pattern);
+      } catch (error) {
+        return {
+          allowed: false,
+          error: `Failed to persist branch rejection: ${toErrorMessage(error)}`,
+        };
+      }
+
+      return {
+        allowed: false,
+        addRejectedPatterns: [decision.pattern],
+      };
+    }
+  }
+}
+
+async function stopGitHookSocketServers(): Promise<void> {
+  const closeTasks = [...gitHookSocketServers.entries()].map(
+    async ([socketPath, server]) => {
+      try {
+        await server.close();
+      } catch (error) {
+        console.error(
+          `Failed to close git hook socket ${socketPath}: ${toErrorMessage(error)}`,
+        );
+      }
+    },
+  );
+
+  await Promise.all(closeTasks);
+  gitHookSocketServers.clear();
+}
+
+async function startGitHookSocketServers(): Promise<void> {
+  await stopGitHookSocketServers();
+
+  const config = getConfig();
+
+  for (const [host, hostConfig] of Object.entries(config)) {
+    if (!hostConfig.git) {
+      continue;
+    }
+
+    const socketPath = getHookSocketPath(hostConfig.git);
+    if (gitHookSocketServers.has(socketPath)) {
+      continue;
+    }
+
+    const socketServer = await startHookSocketServer(
+      socketPath,
+      handleGitHookSocketApproval,
+    );
+
+    gitHookSocketServers.set(socketPath, socketServer);
+    console.log(
+      `Git hook approval socket listening for ${host} at ${socketServer.socketPath}`,
+    );
+  }
+}
 
 async function handleRequest(reqOriginal: Request): Promise<Response> {
   const requestUrl = getCanonicalUrl(reqOriginal);
@@ -407,6 +586,7 @@ async function forwardRequestWithSecretSubstitution(
 
 export async function startProxy(): Promise<void> {
   await loadConfig();
+  await startGitHookSocketServers();
 
   const config = getConfig();
   const domains = Object.keys(config);

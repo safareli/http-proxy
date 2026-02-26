@@ -29,5 +29,28 @@
         "rejections": []
       }
     ]
+  },
+  "github.com": {
+    "secrets": [],
+    "git": {
+      "ssh_key_path": "/run/secrets/github-deploy-key",
+      "repos_dir": "./git-repos",
+      "repos": {
+        "owner/repo": {
+          "upstream": "git@github.com:owner/repo.git",
+          "base_branch": "main",
+          "allowed_push_branches": [
+            "agent/*"
+          ],
+          "rejected_push_branches": [
+            "main"
+          ],
+          "protected_paths": [
+            ".github/**",
+            "*.nix"
+          ]
+        }
+      }
+    }
   }
 }
