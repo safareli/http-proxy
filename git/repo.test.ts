@@ -206,15 +206,20 @@ describe("git/repo.ts", () => {
       expect(existsSync(hookPath)).toBe(true);
 
       const hookScript = readFileSync(hookPath, "utf8");
-      expect(hookScript).toContain(
-        `export PROXY_CONFIG_PATH='${resolve(customConfigPath)}'`,
-      );
-      expect(hookScript).toContain(
-        `export GIT_PROXY_SOCK='${resolve(hookSocketPath)}'`,
-      );
-      expect(hookScript).toContain(
-        `exec bun run '${resolve(customRunnerPath)}' 'github.com' '${repoKey}'`,
-      );
+      const normalizedHookScript = hookScript
+        .replaceAll(resolve(customConfigPath), "<CONFIG_PATH>")
+        .replaceAll(resolve(hookSocketPath), "<SOCKET_PATH>")
+        .replaceAll(resolve(customRunnerPath), "<RUNNER_PATH>");
+      expect(normalizedHookScript).toMatchInlineSnapshot(`
+        "#!/bin/sh
+        set -eu
+
+        export PROXY_CONFIG_PATH='<CONFIG_PATH>'
+        export GIT_PROXY_SOCK='<SOCKET_PATH>'
+
+        exec bun run '<RUNNER_PATH>' 'github.com' 'owner/hook-enabled'
+        "
+      `);
 
       const hookMode = statSync(hookPath).mode & 0o777;
       expect((hookMode & 0o111) !== 0).toBe(true);

@@ -262,13 +262,13 @@ Simple, no port conflicts, no HTTP overhead, automatically scoped to localhost.
 **Files to create:** `git-hooks.ts` (hook logic), `git-hook-socket.ts` (Unix socket server)
 **Files to port/adapt:** `hooks.ts` from git-proxy
 
-- [ ] **Internal approval socket** (Unix domain socket):
+- [x] **Internal approval socket** (Unix domain socket):
   - Proxy listens on `<repos_dir>/.hook.sock`
   - Hook connects, writes JSON request `{ repo, type, ref, details }`, reads JSON response `{ allowed, pattern? }`
   - Main process triggers Telegram message on each incoming connection, blocks until user responds, writes result back
   - Socket path passed to hooks via env var `GIT_PROXY_SOCK`
 
-- [ ] **Pre-receive hook script** (installed in each bare repo):
+- [x] **Pre-receive hook script** (installed in each bare repo):
   - Reads stdin (ref updates)
   - For each ref update:
     1. Validate protected paths (reject immediately if violated — no Telegram)
@@ -282,7 +282,7 @@ Simple, no port conflicts, no HTTP overhead, automatically scoped to localhost.
          - Otherwise → call socket → Telegram approval with pattern options
     5. If all approved → push to upstream
 
-- [ ] **Telegram message for branch push:**
+- [x] **Telegram message for branch push:**
   - Parse branch name for slash segments
   - Generate pattern options (most specific → least specific):
     - Branch has `/`: exact match → `prefix/*` → `* (except <base_branch>)` → `*`
@@ -293,43 +293,45 @@ Simple, no port conflicts, no HTTP overhead, automatically scoped to localhost.
   - "✓ pattern" → add to `allowed_push_branches` in config
   - "✗ pattern" → add to `rejected_push_branches` in config
 
-- [ ] **Telegram message for tag push:**
+- [x] **Telegram message for tag push:**
   - Buttons: `[✓ Once] [✗ Once]` only (no forever options)
 
-- [ ] **Telegram message for branch deletion:**
+- [x] **Telegram message for branch deletion:**
   - "Allow deleting branch `<branch>` from `owner/repo`?"
   - Buttons: `[✓ Once] [✗ Once]` only (no forever options)
 
-- [ ] **Telegram message for force push:**
+- [x] **Telegram message for force push:**
   - "Allow force push to branch `<branch>` in `owner/repo`?"
   - Buttons: `[✓ Once] [✗ Once]` only (no forever options)
 
 ### Phase 5: End-to-End Wiring & Testing
 
-- [ ] Wire everything together in `proxy.ts`:
+- [x] Wire everything together in `proxy.ts`:
   - `handleRequest()` checks `isGitRequest()` → routes to `handleGitRequest()`
   - `handleGitRequest()` handles clone/fetch approval + git-http-backend proxying
   - Internal approval API runs on startup
-- [ ] Ensure cert generation covers `github.com` (or whatever git host is configured)
-- [ ] Manual testing:
+- [x] Ensure cert generation covers `github.com` (or whatever git host is configured)
+- [x] Automated end-to-end coverage in `git/e2e.test.ts` (including migrated scenarios from legacy `git-proxy` tests):
   - Clone unknown repo → Telegram approval → success
   - Clone known repo → no approval needed → success
+  - Clone checks out configured base branch
   - Push to unapproved branch → Telegram approval → approve with pattern → success
   - Push to approved branch → no approval needed → success
   - Push tag → always asked → success
   - Push modifying protected path → immediate rejection (no Telegram)
+  - Push modifying protected path then reverting → success
   - Push to rejected branch → immediate rejection (no Telegram)
   - Force push → Telegram ask once → success/rejection
   - Branch deletion → Telegram ask once → success/rejection
-  - Timeout → rejection
-  - Client disconnect → cancel Telegram message
+  - Timeout → rejection (socket-level timeout tests)
+  - Client disconnect flow handled in approval handlers
 
 ### Phase 6: Cleanup & Migration
 
-- [ ] Update `proxy-config.example.json` with git config example
-- [ ] Update `README.md` with git proxy documentation
-- [ ] Update `/etc/hosts` setup instructions (need `github.com` pointing to proxy)
-- [ ] Remove standalone git-proxy dependency from any deployment (if applicable)
+- [x] Update `proxy-config.example.json` with git config example
+- [x] Update `README.md` with git proxy documentation
+- [x] Update `/etc/hosts` setup instructions (need `github.com` pointing to proxy)
+- [x] Remove standalone git-proxy dependency from runtime/deployment path (legacy `git-proxy/` kept only for reference/tests)
 
 ---
 
@@ -366,7 +368,6 @@ http-proxy/
 │   ├── hooks.ts             # Pre-receive hook logic (branch/tag validation + approval)
 │   ├── repo.ts              # Repo initialization, upstream sync, SSH env
 │   ├── hook-socket.ts       # Unix domain socket for hook↔main process communication
-│   ├── patterns.ts          # Branch/tag pattern generation for Telegram suggestions
 │   └── utils.ts             # Git helpers (git cmd, locking, glob matching)
 │
 ├── proxy-config.json        # Runtime config (extended with git entries)

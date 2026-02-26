@@ -3,8 +3,11 @@ import {
   startProxy,
   setRequestApprovalHandler,
   setGitReadApprovalHandler,
+  setGitPushApprovalHandler,
   type ApprovalResponse,
   type GitReadApprovalResponse,
+  type GitPushApprovalRequest,
+  type GitPushApprovalResponse,
   type PatternOption,
 } from "./proxy";
 
@@ -31,7 +34,8 @@ interface PendingRequest<TResponse extends { type: string }> {
 
 type AnyPendingRequest =
   | PendingRequest<ApprovalResponse>
-  | PendingRequest<GitReadApprovalResponse>;
+  | PendingRequest<GitReadApprovalResponse>
+  | PendingRequest<GitPushApprovalResponse>;
 
 const pendingRequests = new Map<string, AnyPendingRequest>();
 let requestIdCounter = 0;
@@ -345,6 +349,317 @@ function requestGitReadApproval(
   });
 }
 
+interface BranchPatternOption {
+  description: string;
+  pattern: string;
+  rejectBaseBranch?: string;
+}
+
+function generateBranchPatternOptions(
+  branch: string,
+  baseBranch: string,
+): BranchPatternOption[] {
+  const options: BranchPatternOption[] = [];
+  const seen = new Set<string>();
+
+  const addOption = (option: BranchPatternOption) => {
+    const key = `${option.pattern}::${option.rejectBaseBranch ?? ""}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    options.push(option);
+  };
+
+  addOption({
+    description: branch,
+    pattern: branch,
+  });
+
+  const segments = branch.split("/").filter((segment) => segment.length > 0);
+  if (segments.length > 1) {
+    for (let end = segments.length - 1; end >= 1; end -= 1) {
+      const prefix = segments.slice(0, end).join("/");
+      addOption({
+        description: `${prefix}/*`,
+        pattern: `${prefix}/*`,
+      });
+    }
+  }
+
+  addOption({
+    description: `* (except ${baseBranch})`,
+    pattern: "*",
+    rejectBaseBranch: baseBranch,
+  });
+
+  addOption({
+    description: "*",
+    pattern: "*",
+  });
+
+  return options;
+}
+
+function generateRejectPatternOptions(
+  options: readonly BranchPatternOption[],
+): Array<{ description: string; pattern: string }> {
+  const rejectOptions: Array<{ description: string; pattern: string }> = [];
+  const seenPatterns = new Set<string>();
+
+  for (const option of options) {
+    if (option.rejectBaseBranch) {
+      continue;
+    }
+
+    if (seenPatterns.has(option.pattern)) {
+      continue;
+    }
+
+    seenPatterns.add(option.pattern);
+    rejectOptions.push({
+      description: option.pattern,
+      pattern: option.pattern,
+    });
+  }
+
+  if (!seenPatterns.has("*")) {
+    rejectOptions.push({
+      description: "*",
+      pattern: "*",
+    });
+  }
+
+  return rejectOptions;
+}
+
+function describeGitPushApprovalRequest(
+  request: GitPushApprovalRequest,
+): {
+  prompt: string;
+  onceAllowed: string;
+  onceRejected: string;
+  autoClosed: string;
+  onceAllowLabel: string;
+  onceRejectLabel: string;
+  isBranchApproval: boolean;
+} {
+  switch (request.type) {
+    case "branch":
+      return {
+        prompt: `🔒 Allow pushing branch ${code(request.ref)} to ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Branch push approved (once):\n\n${code(request.ref)} → ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Branch push rejected:\n\n${code(request.ref)} → ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nPush branch ${code(request.ref)} to ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Branch push allowed once",
+        onceRejectLabel: "Branch push rejected",
+        isBranchApproval: true,
+      };
+
+    case "tag":
+      return {
+        prompt: `🔒 Allow pushing tag ${code(request.ref)} to ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Tag push approved (once):\n\n${code(request.ref)} → ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Tag push rejected:\n\n${code(request.ref)} → ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nPush tag ${code(request.ref)} to ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Tag push allowed once",
+        onceRejectLabel: "Tag push rejected",
+        isBranchApproval: false,
+      };
+
+    case "branch-deletion":
+      return {
+        prompt: `🔒 Allow deleting branch ${code(request.ref)} from ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Branch deletion approved (once):\n\n${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Branch deletion rejected:\n\n${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nDelete branch ${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Branch deletion allowed once",
+        onceRejectLabel: "Branch deletion rejected",
+        isBranchApproval: false,
+      };
+
+    case "force-push":
+      return {
+        prompt: `🔒 Allow force push to branch ${code(request.ref)} in ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Force push approved (once):\n\n${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Force push rejected:\n\n${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nForce push ${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Force push allowed once",
+        onceRejectLabel: "Force push rejected",
+        isBranchApproval: false,
+      };
+  }
+}
+
+function requestGitPushApproval(
+  request: GitPushApprovalRequest,
+  signal: AbortSignal,
+): Promise<GitPushApprovalResponse> {
+  return new Promise<GitPushApprovalResponse>((resolveRaw) => {
+    const requestId = String(++requestIdCounter);
+    const messages = describeGitPushApprovalRequest(request);
+
+    const pendingRequest: PendingRequest<GitPushApprovalResponse> = {
+      callbackKeys: [],
+      rejectOnce: { type: "reject-once" },
+      resolve: (res) => {
+        cleanupRequest(requestId);
+        resolveRaw(res);
+      },
+      timeout: setTimeout(() => {
+        console.log(`Git push approval ${requestId} timed out`);
+        pendingRequest.resolve(pendingRequest.rejectOnce);
+      }, APPROVAL_TIMEOUT_MS),
+    };
+
+    pendingRequests.set(requestId, pendingRequest);
+
+    const onAbort = () => {
+      if (!pendingRequests.has(requestId)) {
+        return;
+      }
+
+      console.log(`Git push approval ${requestId} aborted`);
+      pendingRequest.abortedByClient = true;
+      pendingRequest.resolve(pendingRequest.rejectOnce);
+
+      if (pendingRequest.messageId) {
+        bot.api
+          .editMessageText(
+            Number(ownerId),
+            pendingRequest.messageId,
+            messages.autoClosed,
+            { parse_mode: "HTML" },
+          )
+          .catch(() => {});
+      }
+    };
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const reg = (key: string, handler: (ctx: any) => Promise<void>): string => {
+      pendingRequest.callbackKeys.push(key);
+      return registerCallback(key, handler);
+    };
+
+    const onAllowOnce = reg(`git-push:allow-once:${requestId}`, async (ctx) => {
+      pendingRequest.resolve({ type: "allow-once" });
+      await ctx.answerCallbackQuery({ text: messages.onceAllowLabel });
+      await ctx.editMessageText(messages.onceAllowed, { parse_mode: "HTML" });
+    });
+
+    const onRejectOnce = reg(`git-push:reject-once:${requestId}`, async (ctx) => {
+      pendingRequest.resolve(pendingRequest.rejectOnce);
+      await ctx.answerCallbackQuery({ text: messages.onceRejectLabel });
+      await ctx.editMessageText(messages.onceRejected, { parse_mode: "HTML" });
+    });
+
+    const keyboard = new InlineKeyboard()
+      .text("✓ Once", onAllowOnce)
+      .text("✗ Once", onRejectOnce);
+
+    if (messages.isBranchApproval) {
+      const baseBranch = request.baseBranch ?? "main";
+      const allowPatternOptions = generateBranchPatternOptions(
+        request.ref,
+        baseBranch,
+      );
+      const rejectPatternOptions = generateRejectPatternOptions(allowPatternOptions);
+
+      keyboard
+        .text(
+          "✗ Forever ▸",
+          reg(`git-push:reject-menu:${requestId}`, async (ctx) => {
+            await ctx.answerCallbackQuery();
+
+            const rejectKeyboard = new InlineKeyboard()
+              .text("✓ Once", onAllowOnce)
+              .text("✗ Once", onRejectOnce)
+              .row();
+
+            rejectPatternOptions.forEach((option, index) => {
+              rejectKeyboard
+                .text(
+                  `✗ ${option.description}`,
+                  reg(`git-push:reject:${requestId}:${index}`, async (ctx) => {
+                    pendingRequest.resolve({
+                      type: "reject-pattern",
+                      pattern: option.pattern,
+                    });
+                    await ctx.answerCallbackQuery({ text: "Rejected forever" });
+                    await ctx.editMessageText(
+                      `🔒 Branch push rejected forever:\n\n${code(request.ref)} → ${code(request.repo)}\nPattern: ${code(option.description)}\nHost: ${code(request.host)}`,
+                      { parse_mode: "HTML" },
+                    );
+                  }),
+                )
+                .row();
+            });
+
+            await ctx.editMessageText(
+              `✗ Reject branch push forever:\n\n${code(request.ref)} → ${code(request.repo)}\nHost: ${code(request.host)}`,
+              {
+                parse_mode: "HTML",
+                reply_markup: rejectKeyboard,
+              },
+            );
+          }),
+        )
+        .row();
+
+      allowPatternOptions.forEach((option, index) => {
+        keyboard
+          .text(
+            `✓ ${option.description}`,
+            reg(`git-push:allow:${requestId}:${index}`, async (ctx) => {
+              pendingRequest.resolve({
+                type: "allow-pattern",
+                pattern: option.pattern,
+                ...(option.rejectBaseBranch
+                  ? { rejectBaseBranch: option.rejectBaseBranch }
+                  : {}),
+              });
+              await ctx.answerCallbackQuery({ text: "Approved forever" });
+              await ctx.editMessageText(
+                `✓ Branch push approved forever:\n\n${code(request.ref)} → ${code(request.repo)}\nPattern: ${code(option.description)}\nHost: ${code(request.host)}`,
+                { parse_mode: "HTML" },
+              );
+            }),
+          )
+          .row();
+      });
+    }
+
+    bot.api
+      .sendMessage(Number(ownerId), messages.prompt, {
+        reply_markup: keyboard,
+        parse_mode: "HTML",
+      })
+      .then((sent) => {
+        pendingRequest.messageId = sent.message_id;
+
+        if (pendingRequest.abortedByClient) {
+          bot.api
+            .editMessageText(
+              Number(ownerId),
+              sent.message_id,
+              messages.autoClosed,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to send git push approval request:", error);
+        pendingRequest.resolve(pendingRequest.rejectOnce);
+      });
+  });
+}
+
 const shutdown = () => {
   console.log("Shutting down gracefully...");
   for (const [, pending] of pendingRequests) {
@@ -362,6 +677,7 @@ process.on("SIGTERM", shutdown);
 
 setRequestApprovalHandler(requestApproval);
 setGitReadApprovalHandler(requestGitReadApproval);
+setGitPushApprovalHandler(requestGitPushApproval);
 
 console.log("Starting bot and proxy...");
 

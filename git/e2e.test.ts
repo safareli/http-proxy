@@ -6,9 +6,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig } from "../config";
+import { addGitAllowedPushBranch, loadConfig } from "../config";
 import type { RepoConfig } from "../git-config";
 import { mergeProcessEnv, setEnvVars } from "../test-utils/env";
 import {
@@ -23,6 +23,12 @@ import {
   handleGitRequest,
   type GitRequestDependencies,
 } from "./handler";
+import {
+  startHookSocketServer,
+  type HookApprovalRequest,
+  type HookApprovalResponse,
+  type HookSocketServer,
+} from "./hook-socket";
 import { git, type GitResult } from "./utils";
 
 const E2E_IDENTITY: GitIdentity = {
@@ -48,6 +54,11 @@ interface E2EContext {
   restoreEnv: () => void;
 }
 
+type HookApprovalHandler = (
+  request: HookApprovalRequest,
+  signal: AbortSignal,
+) => Promise<HookApprovalResponse>;
+
 async function runGit(
   args: string[],
   options: {
@@ -66,6 +77,21 @@ async function runGitChecked(
   options: GitRunOptions = {},
 ): Promise<string> {
   return runGitCheckedShared(runGit, args, options);
+}
+
+async function getRefShaOrNull(
+  repoPath: string,
+  refName: string,
+): Promise<string | null> {
+  const result = await runGit(["rev-parse", "--verify", refName], {
+    cwd: repoPath,
+  });
+
+  if (!result.success) {
+    return null;
+  }
+
+  return result.stdout.trim();
 }
 
 function createRepoConfig(upstream: string, baseBranch = "main"): RepoConfig {
@@ -129,9 +155,36 @@ function normalizeOutput(output: string, ctx: E2EContext): string {
     .replaceAll(`localhost:${ctx.port}`, "localhost:<PORT>");
 }
 
+async function cloneRepoAndConfigureIdentity(
+  ctx: E2EContext,
+  repoPath: string,
+  targetDirName: string,
+): Promise<string> {
+  const cloneDir = join(ctx.tmpDir, targetDirName);
+  const cloneResult = await cloneRepo(ctx.port, repoPath, cloneDir);
+  expect(cloneResult.success).toBe(true);
+  await configureGitIdentity(runGit, cloneDir, E2E_IDENTITY);
+  return cloneDir;
+}
+
+async function commitFile(
+  cwd: string,
+  filePath: string,
+  content: string,
+  message: string,
+): Promise<void> {
+  const absolutePath = join(cwd, filePath);
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  writeFileSync(absolutePath, content);
+  await runGitChecked(["add", filePath], { cwd });
+  await runGitChecked(["commit", "-m", message], { cwd });
+}
+
 describe("git e2e", () => {
   let ctx: E2EContext;
   let gitRequestDependencies: GitRequestDependencies | undefined;
+  let hookApprovalHandler: HookApprovalHandler;
+  let hookSocketServer: HookSocketServer;
 
   beforeEach(async () => {
     const tmp = mkdtempSync(join(tmpdir(), "http-proxy-git-e2e-"));
@@ -162,9 +215,20 @@ describe("git e2e", () => {
       server,
       restoreEnv,
     };
+
+    hookApprovalHandler = async () => ({
+      allowed: false,
+      error: "No hook approval handler configured for this test",
+    });
+
+    hookSocketServer = await startHookSocketServer(
+      join(reposDir, ".hook.sock"),
+      (request, signal) => hookApprovalHandler(request, signal),
+    );
   });
 
   afterEach(async () => {
+    await hookSocketServer.close();
     ctx.server.stop(true);
     ctx.restoreEnv();
 
@@ -209,6 +273,47 @@ describe("git e2e", () => {
 
     expect(cloneResult.success).toBe(true);
     expect(existsSync(join(cloneDir, "README.md"))).toBe(true);
+  });
+
+  test("clone checks out configured base branch by default", async () => {
+    const repoKey = "owner/custom-base";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-custom-base",
+    );
+
+    const upstreamSeedDir = join(ctx.tmpDir, "upstream-custom-base-seed");
+    await runGitChecked(["clone", upstreamPath, upstreamSeedDir]);
+    await configureGitIdentity(runGit, upstreamSeedDir, E2E_IDENTITY);
+    await runGitChecked(["checkout", "-b", "develop"], {
+      cwd: upstreamSeedDir,
+    });
+    await commitFile(
+      upstreamSeedDir,
+      "DEVELOP.md",
+      "develop\n",
+      "create develop branch",
+    );
+    await runGitChecked(["push", "-u", "origin", "develop"], {
+      cwd: upstreamSeedDir,
+    });
+    await runGitChecked(["symbolic-ref", "HEAD", "refs/heads/develop"], {
+      cwd: upstreamPath,
+    });
+
+    await configureProxy(ctx, {
+      [repoKey]: createRepoConfig(upstreamPath, "develop"),
+    });
+
+    const cloneDir = join(ctx.tmpDir, "client-custom-base");
+    const cloneResult = await cloneRepo(ctx.port, `${repoKey}.git`, cloneDir);
+
+    expect(cloneResult.success).toBe(true);
+
+    const currentBranch = await runGitChecked(["branch", "--show-current"], {
+      cwd: cloneDir,
+    });
+    expect(currentBranch).toBe("develop");
   });
 
   test("fetch syncs latest upstream changes before serving", async () => {
@@ -316,10 +421,12 @@ describe("git e2e", () => {
     const cloneResult = await cloneRepo(ctx.port, `${repoKey}.git`, cloneDir);
 
     expect(cloneResult.success).toBe(false);
-    expect(cloneResult.stderr).toContain("Clone/fetch request rejected");
-    expect(cloneResult.stderr).toContain(
-      "The requested URL returned error: 403",
-    );
+    expect(normalizeOutput(cloneResult.stderr, ctx)).toMatchInlineSnapshot(`
+      "Cloning into '<TMP_DIR>/client-rejected'...
+      remote: Forbidden - Clone/fetch request rejected
+      fatal: unable to access 'http://localhost:<PORT>/owner/rejected.git/': The requested URL returned error: 403
+      "
+    `);
 
     const savedConfig = (await Bun.file(ctx.configPath).json()) as {
       [host: string]: {
@@ -332,23 +439,112 @@ describe("git e2e", () => {
     expect(savedConfig[ctx.host]?.git?.repos?.[repoKey]).toBeUndefined();
   });
 
-  test("push is currently rejected (receive-pack not enabled yet)", async () => {
-    const repoKey = "owner/push-disabled";
-    const upstreamPath = await createUpstreamRepo(ctx.tmpDir, "upstream-push");
+  test("push to unapproved branch can be allowed forever with pattern", async () => {
+    const repoKey = "owner/push-pattern";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-push-pattern",
+    );
 
     await configureProxy(ctx, {
       [repoKey]: createRepoConfig(upstreamPath),
     });
 
-    const cloneDir = join(ctx.tmpDir, "client-push");
-    const cloneResult = await cloneRepo(ctx.port, `${repoKey}.git`, cloneDir);
-    expect(cloneResult.success).toBe(true);
+    let branchApprovalCalls = 0;
+    hookApprovalHandler = async (request) => {
+      expect(request.host).toBe(ctx.host);
+      expect(request.repo).toBe(repoKey);
 
-    await configureGitIdentity(runGit, cloneDir, E2E_IDENTITY);
+      if (request.type !== "branch") {
+        throw new Error(`Unexpected approval request type: ${request.type}`);
+      }
 
-    writeFileSync(join(cloneDir, "feature.txt"), "feature work\n");
-    await runGitChecked(["add", "feature.txt"], { cwd: cloneDir });
-    await runGitChecked(["commit", "-m", "add feature"], { cwd: cloneDir });
+      branchApprovalCalls += 1;
+      await addGitAllowedPushBranch(ctx.host, repoKey, "agent/*");
+      return {
+        allowed: true,
+        addAllowedPatterns: ["agent/*"],
+      };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-push-pattern",
+    );
+
+    await runGitChecked(["checkout", "-b", "agent/feature-x"], {
+      cwd: cloneDir,
+    });
+
+    await commitFile(cloneDir, "feature.txt", "first\n", "first commit");
+
+    const firstPush = await runGit(["push", "origin", "agent/feature-x"], {
+      cwd: cloneDir,
+    });
+    expect(firstPush.success).toBe(true);
+    expect(branchApprovalCalls).toBe(1);
+
+    const configAfterFirstPush = (await Bun.file(ctx.configPath).json()) as {
+      [host: string]: {
+        git?: {
+          repos?: Record<string, RepoConfig>;
+        };
+      };
+    };
+
+    expect(
+      configAfterFirstPush[ctx.host]?.git?.repos?.[repoKey]?.allowed_push_branches,
+    ).toMatchInlineSnapshot(`
+      [
+        "agent/*",
+      ]
+    `);
+
+    await commitFile(cloneDir, "feature.txt", "second\n", "second commit");
+
+    const secondPush = await runGit(["push", "origin", "agent/feature-x"], {
+      cwd: cloneDir,
+    });
+    expect(secondPush.success).toBe(true);
+    expect(branchApprovalCalls).toBe(1);
+  });
+
+  test("push to permanently rejected branch is blocked without approval", async () => {
+    const repoKey = "owner/rejected-main";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-rejected-main",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: {
+        ...createRepoConfig(upstreamPath),
+        rejected_push_branches: ["main"],
+      },
+    });
+
+    let approvalCalls = 0;
+    hookApprovalHandler = async () => {
+      approvalCalls += 1;
+      return { allowed: true };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-rejected-main",
+    );
+
+    await commitFile(cloneDir, "blocked.txt", "blocked\n", "blocked commit");
+
+    const upstreamMainBeforePush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    if (!upstreamMainBeforePush) {
+      throw new Error("Expected upstream main to exist before rejected push");
+    }
 
     const pushResult = await runGit(["push", "origin", "main"], {
       cwd: cloneDir,
@@ -356,9 +552,417 @@ describe("git e2e", () => {
 
     expect(pushResult.success).toBe(false);
     expect(normalizeOutput(pushResult.stderr, ctx)).toMatchInlineSnapshot(`
-      "remote: Git push is not enabled yet
-      fatal: unable to access 'http://localhost:<PORT>/owner/push-disabled.git/': The requested URL returned error: 501
+      "remote: 
+      remote: ==================================================        
+      remote: PUSH REJECTED        
+      remote: ==================================================        
+      remote: Branch 'main' is permanently blocked for pushes        
+      remote: ==================================================        
+      remote: 
+      To http://localhost:<PORT>/owner/rejected-main.git
+       ! [remote rejected] main -> main (pre-receive hook declined)
+      error: failed to push some refs to 'http://localhost:<PORT>/owner/rejected-main.git'
       "
     `);
+
+    const upstreamMainAfterPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    expect(upstreamMainAfterPush).toBe(upstreamMainBeforePush);
+
+    expect(approvalCalls).toBe(0);
+  });
+
+  test("tag pushes always request one-time approval", async () => {
+    const repoKey = "owner/tag-approval";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-tag-approval",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: createRepoConfig(upstreamPath),
+    });
+
+    let tagApprovalCalls = 0;
+    hookApprovalHandler = async (request) => {
+      if (request.type !== "tag") {
+        throw new Error(`Unexpected approval request type: ${request.type}`);
+      }
+      tagApprovalCalls += 1;
+      return { allowed: true };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-tag-approval",
+    );
+
+    await runGitChecked(["tag", "v1.0.0"], { cwd: cloneDir });
+    const firstPush = await runGit(["push", "origin", "v1.0.0"], {
+      cwd: cloneDir,
+    });
+    expect(firstPush.success).toBe(true);
+
+    await runGitChecked(["tag", "v1.0.1"], { cwd: cloneDir });
+    const secondPush = await runGit(["push", "origin", "v1.0.1"], {
+      cwd: cloneDir,
+    });
+    expect(secondPush.success).toBe(true);
+
+    expect(tagApprovalCalls).toBe(2);
+  });
+
+  test("push touching protected paths is rejected without approval", async () => {
+    const repoKey = "owner/protected-paths";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-protected-paths",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: {
+        ...createRepoConfig(upstreamPath),
+        allowed_push_branches: ["agent/*"],
+        protected_paths: [".github/**"],
+      },
+    });
+
+    let approvalCalls = 0;
+    hookApprovalHandler = async () => {
+      approvalCalls += 1;
+      return { allowed: true };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-protected-paths",
+    );
+
+    await runGitChecked(["checkout", "-b", "agent/protected"], {
+      cwd: cloneDir,
+    });
+
+    await commitFile(
+      cloneDir,
+      ".github/workflows/ci.yml",
+      "name: blocked\n",
+      "modify protected workflow",
+    );
+
+    const upstreamMainBeforePush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    if (!upstreamMainBeforePush) {
+      throw new Error("Expected upstream main to exist before rejected protected-path push");
+    }
+
+    const pushResult = await runGit(["push", "origin", "agent/protected"], {
+      cwd: cloneDir,
+    });
+
+    expect(pushResult.success).toBe(false);
+    expect(normalizeOutput(pushResult.stderr, ctx)).toMatchInlineSnapshot(`
+      "remote: 
+      remote: ==================================================        
+      remote: PUSH REJECTED        
+      remote: ==================================================        
+      remote: Changes to protected paths detected:        
+      remote:   - .github/workflows/ci.yml        
+      remote: ==================================================        
+      remote: 
+      To http://localhost:<PORT>/owner/protected-paths.git
+       ! [remote rejected] agent/protected -> agent/protected (pre-receive hook declined)
+      error: failed to push some refs to 'http://localhost:<PORT>/owner/protected-paths.git'
+      "
+    `);
+
+    const upstreamProtectedBranchAfterPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/protected",
+    );
+    expect(upstreamProtectedBranchAfterPush).toBeNull();
+
+    const upstreamMainAfterPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    expect(upstreamMainAfterPush).toBe(upstreamMainBeforePush);
+
+    expect(approvalCalls).toBe(0);
+  });
+
+  test("push touching protected paths then reverting is allowed", async () => {
+    const repoKey = "owner/protected-revert";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-protected-revert",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: {
+        ...createRepoConfig(upstreamPath),
+        allowed_push_branches: ["agent/*"],
+        protected_paths: [".github/**"],
+      },
+    });
+
+    let approvalCalls = 0;
+    hookApprovalHandler = async () => {
+      approvalCalls += 1;
+      return { allowed: true };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-protected-revert",
+    );
+
+    await runGitChecked(["checkout", "-b", "agent/revert-protected"], {
+      cwd: cloneDir,
+    });
+
+    await commitFile(
+      cloneDir,
+      ".github/workflows/ci.yml",
+      "name: blocked\n",
+      "add protected workflow",
+    );
+
+    const upstreamMainBeforeFirstPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    if (!upstreamMainBeforeFirstPush) {
+      throw new Error("Expected upstream main to exist before rejected protected-path push");
+    }
+
+    const firstPush = await runGit(["push", "origin", "agent/revert-protected"], {
+      cwd: cloneDir,
+    });
+    expect(firstPush.success).toBe(false);
+    expect(normalizeOutput(firstPush.stderr, ctx)).toMatchInlineSnapshot(`
+      "remote: 
+      remote: ==================================================        
+      remote: PUSH REJECTED        
+      remote: ==================================================        
+      remote: Changes to protected paths detected:        
+      remote:   - .github/workflows/ci.yml        
+      remote: ==================================================        
+      remote: 
+      To http://localhost:<PORT>/owner/protected-revert.git
+       ! [remote rejected] agent/revert-protected -> agent/revert-protected (pre-receive hook declined)
+      error: failed to push some refs to 'http://localhost:<PORT>/owner/protected-revert.git'
+      "
+    `);
+
+    const upstreamBranchAfterRejectedPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/revert-protected",
+    );
+    expect(upstreamBranchAfterRejectedPush).toBeNull();
+
+    const upstreamMainAfterRejectedPush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/main",
+    );
+    expect(upstreamMainAfterRejectedPush).toBe(upstreamMainBeforeFirstPush);
+
+    await runGitChecked(["rm", "-r", ".github"], { cwd: cloneDir });
+    await runGitChecked(["commit", "-m", "remove protected workflow"], {
+      cwd: cloneDir,
+    });
+
+    await commitFile(cloneDir, "safe.txt", "safe\n", "add safe file");
+
+    const secondPush = await runGit(["push", "origin", "agent/revert-protected"], {
+      cwd: cloneDir,
+    });
+    expect(secondPush.success).toBe(true);
+
+    const upstreamBranchSha = await runGitChecked(
+      ["rev-parse", "--verify", "refs/heads/agent/revert-protected"],
+      {
+        cwd: upstreamPath,
+      },
+    );
+    expect(upstreamBranchSha.length).toBeGreaterThan(0);
+    expect(approvalCalls).toBe(0);
+  });
+
+  test("force push requires one-time approval every time", async () => {
+    const repoKey = "owner/force-approval";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-force-approval",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: {
+        ...createRepoConfig(upstreamPath),
+        allowed_push_branches: ["agent/*"],
+      },
+    });
+
+    let forceApprovalCalls = 0;
+    hookApprovalHandler = async (request) => {
+      if (request.type !== "force-push") {
+        throw new Error(`Unexpected approval request type: ${request.type}`);
+      }
+
+      forceApprovalCalls += 1;
+      return { allowed: forceApprovalCalls > 1 };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-force-approval",
+    );
+
+    await runGitChecked(["checkout", "-b", "agent/force"], { cwd: cloneDir });
+
+    await commitFile(cloneDir, "force.txt", "1\n", "force 1");
+    expect((await runGit(["push", "origin", "agent/force"], { cwd: cloneDir })).success).toBe(true);
+
+    await commitFile(cloneDir, "force.txt", "2\n", "force 2");
+    expect((await runGit(["push", "origin", "agent/force"], { cwd: cloneDir })).success).toBe(true);
+
+    await runGitChecked(["reset", "--hard", "HEAD~1"], { cwd: cloneDir });
+    await commitFile(cloneDir, "force.txt", "alternate\n", "force rewrite");
+
+    const upstreamBranchBeforeRejectedForcePush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/force",
+    );
+    if (!upstreamBranchBeforeRejectedForcePush) {
+      throw new Error("Expected upstream force branch to exist before rejected force push");
+    }
+
+    const firstForcePush = await runGit(
+      ["push", "--force", "origin", "agent/force"],
+      {
+        cwd: cloneDir,
+      },
+    );
+    expect(firstForcePush.success).toBe(false);
+    expect(normalizeOutput(firstForcePush.stderr, ctx)).toMatchInlineSnapshot(`
+      "remote: 
+      remote: ==================================================        
+      remote: PUSH REJECTED        
+      remote: ==================================================        
+      remote: Force push rejected for branch agent/force        
+      remote: ==================================================        
+      remote: 
+      To http://localhost:<PORT>/owner/force-approval.git
+       ! [remote rejected] agent/force -> agent/force (pre-receive hook declined)
+      error: failed to push some refs to 'http://localhost:<PORT>/owner/force-approval.git'
+      "
+    `);
+
+    const upstreamBranchAfterRejectedForcePush = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/force",
+    );
+    expect(upstreamBranchAfterRejectedForcePush).toBe(
+      upstreamBranchBeforeRejectedForcePush,
+    );
+
+    const secondForcePush = await runGit(
+      ["push", "--force", "origin", "agent/force"],
+      {
+        cwd: cloneDir,
+      },
+    );
+    expect(secondForcePush.success).toBe(true);
+
+    expect(forceApprovalCalls).toBe(2);
+  });
+
+  test("branch deletion requires one-time approval", async () => {
+    const repoKey = "owner/delete-approval";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-delete-approval",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: {
+        ...createRepoConfig(upstreamPath),
+        allowed_push_branches: ["agent/*"],
+      },
+    });
+
+    let deletionApprovalCalls = 0;
+    hookApprovalHandler = async (request) => {
+      if (request.type !== "branch-deletion") {
+        throw new Error(`Unexpected approval request type: ${request.type}`);
+      }
+      deletionApprovalCalls += 1;
+      return { allowed: deletionApprovalCalls > 1 };
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-delete-approval",
+    );
+
+    await runGitChecked(["checkout", "-b", "agent/delete-me"], { cwd: cloneDir });
+    await commitFile(cloneDir, "delete.txt", "delete me\n", "add delete branch");
+
+    const branchPush = await runGit(["push", "origin", "agent/delete-me"], {
+      cwd: cloneDir,
+    });
+    expect(branchPush.success).toBe(true);
+
+    const upstreamBranchBeforeRejectedDelete = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/delete-me",
+    );
+    if (!upstreamBranchBeforeRejectedDelete) {
+      throw new Error("Expected upstream delete branch to exist before rejected deletion");
+    }
+
+    const firstDelete = await runGit(["push", "origin", ":agent/delete-me"], {
+      cwd: cloneDir,
+    });
+    expect(firstDelete.success).toBe(false);
+    expect(normalizeOutput(firstDelete.stderr, ctx)).toMatchInlineSnapshot(`
+      "remote: 
+      remote: ==================================================        
+      remote: PUSH REJECTED        
+      remote: ==================================================        
+      remote: Branch deletion rejected for agent/delete-me        
+      remote: ==================================================        
+      remote: 
+      To http://localhost:<PORT>/owner/delete-approval.git
+       ! [remote rejected] agent/delete-me (pre-receive hook declined)
+      error: failed to push some refs to 'http://localhost:<PORT>/owner/delete-approval.git'
+      "
+    `);
+
+    const upstreamBranchAfterRejectedDelete = await getRefShaOrNull(
+      upstreamPath,
+      "refs/heads/agent/delete-me",
+    );
+    expect(upstreamBranchAfterRejectedDelete).toBe(
+      upstreamBranchBeforeRejectedDelete,
+    );
+
+    const secondDelete = await runGit(
+      ["push", "origin", ":agent/delete-me"],
+      {
+        cwd: cloneDir,
+      },
+    );
+    expect(secondDelete.success).toBe(true);
+
+    expect(deletionApprovalCalls).toBe(2);
   });
 });
