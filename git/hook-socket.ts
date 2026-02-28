@@ -9,6 +9,8 @@ const DEFAULT_SOCKET_TIMEOUT_MS = 255 * 1000;
 export const HookApprovalTypeSchema = z.enum([
   "branch",
   "tag",
+  "tag-update",
+  "tag-deletion",
   "branch-deletion",
   "force-push",
 ]);
