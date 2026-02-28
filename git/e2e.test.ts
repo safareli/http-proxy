@@ -677,6 +677,83 @@ describe("git e2e", () => {
     expect(tagApprovalCalls).toBe(2);
   });
 
+  test("tag deletion requires one-time approval", async () => {
+    const repoKey = "owner/tag-deletion";
+    const upstreamPath = await createUpstreamRepo(
+      ctx.tmpDir,
+      "upstream-tag-deletion",
+    );
+
+    await configureProxy(ctx, {
+      [repoKey]: createRepoConfig(upstreamPath),
+    });
+
+    let tagApprovalCalls = 0;
+    let tagDeletionApprovalCalls = 0;
+    hookApprovalHandler = async (request) => {
+      if (request.type === "tag") {
+        tagApprovalCalls += 1;
+        return { allowed: true };
+      }
+      if (request.type === "tag-deletion") {
+        tagDeletionApprovalCalls += 1;
+        return { allowed: tagDeletionApprovalCalls > 1 };
+      }
+      throw new Error(`Unexpected approval request type: ${request.type}`);
+    };
+
+    const cloneDir = await cloneRepoAndConfigureIdentity(
+      ctx,
+      `${repoKey}.git`,
+      "client-tag-deletion",
+    );
+
+    // Create and push a tag
+    await runGitChecked(["tag", "v2.0.0"], { cwd: cloneDir });
+    const pushResult = await runGit(["push", "origin", "v2.0.0"], {
+      cwd: cloneDir,
+    });
+    expect(pushResult.success).toBe(true);
+    expect(tagApprovalCalls).toBe(1);
+
+    // Verify tag exists on upstream
+    const upstreamTagBeforeDelete = await getRefShaOrNull(
+      upstreamPath,
+      "refs/tags/v2.0.0",
+    );
+    expect(upstreamTagBeforeDelete).not.toBeNull();
+
+    // First deletion attempt - rejected
+    const firstDelete = await runGit(["push", "origin", ":refs/tags/v2.0.0"], {
+      cwd: cloneDir,
+    });
+    expect(firstDelete.success).toBe(false);
+    expect(normalizeOutput(firstDelete.stderr, ctx)).toContain("PUSH REJECTED");
+    expect(normalizeOutput(firstDelete.stderr, ctx)).toContain(
+      "Tag push rejected for v2.0.0",
+    );
+
+    // Verify tag still exists on upstream after rejected deletion
+    expect(
+      await getRefShaOrNull(upstreamPath,"refs/tags/v2.0.0")
+    ).toBe(upstreamTagBeforeDelete);
+
+    // Second deletion attempt - approved
+    const secondDelete = await runGit(
+      ["push", "origin", ":refs/tags/v2.0.0"],
+      { cwd: cloneDir },
+    );
+    expect(secondDelete.success).toBe(true);
+
+    // Verify tag was deleted from upstream
+    expect(
+      await getRefShaOrNull(upstreamPath, "refs/tags/v2.0.0")
+    ).toBeNull();
+
+    expect(tagApprovalCalls).toBe(1);
+    expect(tagDeletionApprovalCalls).toBe(2);
+  });
+
   test("push touching protected paths is rejected without approval", async () => {
     const repoKey = "owner/protected-paths";
     const upstreamPath = await createUpstreamRepo(

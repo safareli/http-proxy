@@ -351,12 +351,14 @@ async function validateUpdate(
   }
 
   if (parsedRef.type === "tag") {
+    const isTagDeletion = isZeroSha(update.newSha);
+    const isTagUpdate = !isZeroSha(update.newSha) && !isZeroSha(update.oldSha);
     let approvalResponse: HookApprovalResponse;
     try {
       approvalResponse = await requestApproval({
         host: ctx.host,
         repo: ctx.repoKey,
-        type: "tag",
+        type: isTagDeletion ? "tag-deletion" : isTagUpdate ? "tag-update" : "tag",
         ref: parsedRef.name,
       });
     } catch (error) {

@@ -467,6 +467,28 @@ function describeGitPushApprovalRequest(
         isBranchApproval: false,
       };
 
+    case "tag-update":
+      return {
+        prompt: `🔒 Allow updating existing tag ${code(request.ref)} in ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Tag update approved (once):\n\n${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Tag update rejected:\n\n${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nUpdate tag ${code(request.ref)} in ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Tag update allowed once",
+        onceRejectLabel: "Tag update rejected",
+        isBranchApproval: false,
+      };
+
+    case "tag-deletion":
+      return {
+        prompt: `🔒 Allow deleting tag ${code(request.ref)} from ${code(request.repo)}?\n\nHost: ${code(request.host)}`,
+        onceAllowed: `✓ Tag deletion approved (once):\n\n${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceRejected: `✗ Tag deletion rejected:\n\n${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        autoClosed: `⊘ Auto-closed (client disconnected):\n\nDelete tag ${code(request.ref)} from ${code(request.repo)}\nHost: ${code(request.host)}`,
+        onceAllowLabel: "Tag deletion allowed once",
+        onceRejectLabel: "Tag deletion rejected",
+        isBranchApproval: false,
+      };
+
     case "branch-deletion":
       return {
         prompt: `🔒 Allow deleting branch ${code(request.ref)} from ${code(request.repo)}?\n\nHost: ${code(request.host)}`,

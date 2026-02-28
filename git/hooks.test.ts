@@ -384,7 +384,7 @@ describe("git/hooks.ts", () => {
     expect(await refExists(fixture.upstreamPath, `refs/heads/${branchTwo}`)).toBe(true);
   });
 
-  test("tag updates request approval and push to upstream", async () => {
+  test("new tag push requests approval with type 'tag'", async () => {
     const fixture = await createRepoFixture();
 
     const tagName = "v1.0.0";
@@ -416,6 +416,48 @@ describe("git/hooks.ts", () => {
       },
     ]);
     expect(await refExists(fixture.upstreamPath, `refs/tags/${tagName}`)).toBe(true);
+  });
+
+  test("updating existing tag requests approval with type 'tag-update'", async () => {
+    const fixture = await createRepoFixture();
+
+    const tagName = "v2.0.0";
+    const oldTagSha = await createTagInProxy(fixture, tagName);
+
+    // Create a new commit in the proxy repo to point the tag at
+    const branch = "agent/tag-update-src";
+    const newSha = await createBranchCommitInProxy(
+      fixture,
+      branch,
+      "tag-update.txt",
+      "new content\n",
+    );
+
+    const approvals: HookApprovalRequest[] = [];
+
+    const result = await validateAndPush(
+      [
+        {
+          oldSha: oldTagSha,
+          newSha,
+          refName: `refs/tags/${tagName}`,
+        },
+      ],
+      createContext(fixture, async (request) => {
+        approvals.push(request);
+        return { allowed: true };
+      }),
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(approvals).toEqual([
+      {
+        host: "github.com",
+        repo: fixture.repoKey,
+        type: "tag-update",
+        ref: tagName,
+      },
+    ]);
   });
 
   test("force push requires dedicated approval", async () => {
