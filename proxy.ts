@@ -99,12 +99,19 @@ export function setGitPushApprovalHandler(fn: GitPushApprovalFn): void {
   requestGitPushApprovalFn = fn;
 }
 
-type RequestLoaded = {
+type RequestBase = {
   url: URL;
   method: string;
   headers: Headers;
-  body: ArrayBuffer | null;
   signal: AbortSignal;
+};
+
+type RequestLoaded = RequestBase & {
+  body: ArrayBuffer | null;
+};
+
+type RequestForwardable = RequestBase & {
+  body: Bun.BodyInit | null;
 };
 
 function getCanonicalUrl(req: Request): URL {
@@ -114,17 +121,28 @@ function getCanonicalUrl(req: Request): URL {
   return url;
 }
 
-const loadRequest = async (req: Request): Promise<RequestLoaded> => {
+function getRequestBase(req: Request): RequestBase {
   const url = getCanonicalUrl(req);
 
   const headers = new Headers(req.headers);
   headers.delete("host");
 
+  return { url, method: req.method, headers, signal: req.signal };
+}
+
+function getRequestBodyStream(req: Request): ReadableStream<Uint8Array> | null {
+  return req.method !== "GET" && req.method !== "HEAD" ? req.body : null;
+}
+
+const loadRequest = async (
+  req: Request,
+  base = getRequestBase(req),
+): Promise<RequestLoaded> => {
   const body =
-    req.method !== "GET" && req.method !== "HEAD"
+    base.method !== "GET" && base.method !== "HEAD"
       ? await req.arrayBuffer()
       : null;
-  return { url, method: req.method, headers, body, signal: req.signal };
+  return { ...base, body };
 };
 
 function toErrorMessage(error: unknown): string {
@@ -301,14 +319,18 @@ async function handleRequest(reqOriginal: Request): Promise<Response> {
     }
   }
 
-  const req = await loadRequest(reqOriginal);
-
-  const secretConfig = findSecretConfigFromHeaders(req);
+  const reqBase = getRequestBase(reqOriginal);
+  const secretConfig = findSecretConfigFromHeaders(reqBase);
 
   if (!secretConfig) {
     console.log(`  → Request without secrets forwarding`);
-    return forwardRequest(req);
+    return forwardRequest({
+      ...reqBase,
+      body: getRequestBodyStream(reqOriginal),
+    });
   }
+
+  const req = await loadRequest(reqOriginal, reqBase);
 
   if (req.body != null && req.body.byteLength > 0) {
     console.log(`  body: ${new TextDecoder().decode(req.body)}`);
@@ -537,14 +559,29 @@ async function handleGraphQLRequest(
   }
 }
 
-async function forwardRequest(req: RequestLoaded): Promise<Response> {
+function createForwardFetchInit(
+  req: RequestForwardable,
+  headers: Headers = req.headers,
+): BunFetchRequestInit {
+  const init: BunFetchRequestInit & { duplex?: "half" } = {
+    method: req.method,
+    headers,
+    body: req.body,
+    signal: req.signal,
+    decompress: false,
+    // verbose: true,
+  };
+
+  if (req.body instanceof ReadableStream) {
+    init.duplex = "half";
+  }
+
+  return init;
+}
+
+async function forwardRequest(req: RequestForwardable): Promise<Response> {
   try {
-    const response = await fetch(req.url, {
-      method: req.method,
-      headers: req.headers,
-      body: req.body,
-      decompress: false,
-    });
+    const response = await fetch(req.url, createForwardFetchInit(req));
     return response;
   } catch (error) {
     console.error(`  → Error forwarding request: ${error}`);
@@ -567,16 +604,17 @@ async function forwardRequestWithSecretSubstitution(
   }
 
   try {
-    const response = await fetch(req.url, {
-      method: req.method,
-      headers: substituteSecretInHeaders(
-        req.headers,
-        secretConfig.secret,
-        realSecret,
+    const response = await fetch(
+      req.url,
+      createForwardFetchInit(
+        req,
+        substituteSecretInHeaders(
+          req.headers,
+          secretConfig.secret,
+          realSecret,
+        ),
       ),
-      body: req.body,
-      decompress: false,
-    });
+    );
     return response;
   } catch (error) {
     console.error(`  → Error forwarding request: ${error}`);
