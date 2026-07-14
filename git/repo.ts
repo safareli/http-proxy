@@ -184,6 +184,15 @@ export async function initializeRepo(
     );
   }
 
+  const pruneExpireResult = await git(["config", "gc.pruneExpire", "now"], {
+    cwd: repoPath,
+  });
+  if (!pruneExpireResult.success) {
+    throw new Error(
+      `Failed to set gc.pruneExpire: ${pruneExpireResult.stderr}`,
+    );
+  }
+
   if (options.hook) {
     installPreReceiveHook(repoPath, repoKey, options.hook);
   }
@@ -216,5 +225,10 @@ export async function syncRepoFromUpstream(
 
   if (!fetchResult.success) {
     throw new Error(`Failed to fetch from upstream: ${fetchResult.stderr}`);
+  }
+
+  const gcResult = await git(["gc", "--auto"], { cwd: repoPath });
+  if (!gcResult.success) {
+    console.warn(`git gc --auto failed for ${repoPath}: ${gcResult.stderr}`);
   }
 }
