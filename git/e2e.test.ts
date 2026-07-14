@@ -1104,4 +1104,254 @@ describe("git e2e", () => {
 
     expect(deletionApprovalCalls).toBe(2);
   });
+
+  describe("empty upstream repo (no branches, like freshly created GitHub repo)", () => {
+    async function createEmptyUpstreamRepo(name: string): Promise<string> {
+      const upstreamPath = join(ctx.tmpDir, `${name}.git`);
+      await runGitChecked(["init", "--bare", upstreamPath]);
+      return upstreamPath;
+    }
+
+    async function initLocalRepo(
+      repoKey: string,
+      localDirName: string,
+    ): Promise<string> {
+      const localDir = join(ctx.tmpDir, localDirName);
+      mkdirSync(localDir, { recursive: true });
+      await runGitChecked(["init"], { cwd: localDir });
+      await configureGitIdentity(runGit, localDir, E2E_IDENTITY);
+
+      await commitFile(localDir, "README.md", "# hi\n", "first commit");
+      await runGitChecked(["branch", "-M", "main"], { cwd: localDir });
+      await runGitChecked(
+        [
+          "remote",
+          "add",
+          "origin",
+          `http://localhost:${ctx.port}/${repoKey}.git`,
+        ],
+        { cwd: localDir },
+      );
+
+      return localDir;
+    }
+
+    // BUG 1: handleGitRequest rejects receive-pack for unknown repos with 404,
+    // so pushing to a repo that isn't in the config yet fails immediately
+    // (unlike clone/fetch which can go through the approval flow).
+    test("push to unconfigured repo is rejected (no approval flow for push yet)", async () => {
+      const repoKey = "owner/empty-upstream-unconfigured";
+      const upstreamPath = await createEmptyUpstreamRepo(
+        "upstream-empty-unconfigured",
+      );
+
+      // Repo is NOT in the proxy config — only the git host is configured
+      await configureProxy(ctx, {});
+
+      let readApprovalCalls = 0;
+      gitRequestDependencies = {
+        requestReadApproval: async () => {
+          readApprovalCalls += 1;
+          return { type: "allow-forever" };
+        },
+        createRepoConfigOnApproval: () => createRepoConfig(upstreamPath),
+      };
+
+      const localDir = await initLocalRepo(
+        repoKey,
+        "client-empty-unconfigured",
+      );
+
+      const pushResult = await runGit(["push", "-u", "origin", "main"], {
+        cwd: localDir,
+      });
+
+      // Push to unknown repo gets 404 without going through approval
+      expect(pushResult.success).toBe(false);
+      expect(readApprovalCalls).toBe(0);
+      expect(normalizeOutput(pushResult.stderr, ctx)).toMatchInlineSnapshot(
+        `
+          "remote: Not Found - Unknown repo: owner/empty-upstream-unconfigured
+          fatal: repository 'http://localhost:<PORT>/owner/empty-upstream-unconfigured.git/' not found
+          "
+        `,
+      );
+    });
+
+    // Workaround: clone first (triggers approval & persists config), then push.
+    // This works when there are no protected paths.
+    test("clone then push works when repo has no protected paths", async () => {
+      const repoKey = "owner/empty-upstream-clone-push";
+      const upstreamPath = await createEmptyUpstreamRepo(
+        "upstream-empty-clone-push",
+      );
+
+      await configureProxy(ctx, {});
+
+      gitRequestDependencies = {
+        requestReadApproval: async () => ({ type: "allow-forever" }),
+        createRepoConfigOnApproval: () => ({
+          ...createRepoConfig(upstreamPath),
+          allowed_push_branches: ["main"],
+        }),
+      };
+
+      // Clone first to trigger approval and persist the repo config
+      const cloneDir = join(ctx.tmpDir, "client-empty-clone-push");
+      const cloneResult = await cloneRepo(
+        ctx.port,
+        `${repoKey}.git`,
+        cloneDir,
+      );
+      // Clone of empty repo gives a warning but succeeds
+      expect(cloneResult.success).toBe(true);
+
+      await configureGitIdentity(runGit, cloneDir, E2E_IDENTITY);
+      await commitFile(cloneDir, "README.md", "# hi\n", "first commit");
+
+      const pushResult = await runGit(["push", "-u", "origin", "main"], {
+        cwd: cloneDir,
+      });
+
+      expect(pushResult.success).toBe(true);
+
+      // Verify the commit made it to upstream
+      const upstreamMainSha = await getRefShaOrNull(
+        upstreamPath,
+        "refs/heads/main",
+      );
+      expect(upstreamMainSha).not.toBeNull();
+
+      const localSha = await runGitChecked(["rev-parse", "HEAD"], {
+        cwd: cloneDir,
+      });
+      expect(upstreamMainSha).toBe(localSha);
+    });
+
+    test("push from shallow clone to empty upstream", async () => {
+      const repoKey = "owner/empty-upstream-shallow";
+
+      // Create a source repo with history to shallow-clone from
+      const sourceUpstream = await createUpstreamRepo(
+        ctx.tmpDir,
+        "source-shallow",
+      );
+      for (let i = 0; i < 10; i++) {
+        await pushDirectlyToUpstream(
+          ctx.tmpDir,
+          sourceUpstream,
+          `file-${i}.txt`,
+          `content ${i}\n`,
+        );
+      }
+
+      const targetUpstream = await createEmptyUpstreamRepo("target-shallow");
+
+      await configureProxy(ctx, {
+        [repoKey]: {
+          ...createRepoConfig(targetUpstream),
+          allowed_push_branches: ["main"],
+        },
+      });
+
+      // Shallow clone the source (depth=3: has 3 commits, parents beyond are missing)
+      const cloneDir = join(ctx.tmpDir, "client-shallow");
+      const cloneResult = await runGit([
+        "clone",
+        "--depth",
+        "3",
+        sourceUpstream,
+        cloneDir,
+      ]);
+      expect(cloneResult.success).toBe(true);
+
+      // Remove source so nothing can accidentally reach it during push
+      rmSync(sourceUpstream, { recursive: true, force: true });
+
+      await configureGitIdentity(runGit, cloneDir, E2E_IDENTITY);
+
+      // Point remote to the proxy (targeting the empty upstream)
+      await runGitChecked(
+        [
+          "remote",
+          "set-url",
+          "origin",
+          `http://localhost:${ctx.port}/${repoKey}.git`,
+        ],
+        { cwd: cloneDir },
+      );
+
+      const pushResult = await runGit(["push", "-u", "origin", "main"], {
+        cwd: cloneDir,
+      });
+
+      expect(pushResult.success).toBe(true);
+
+      // Verify the commit made it to upstream
+      const targetMainSha = await getRefShaOrNull(
+        targetUpstream,
+        "refs/heads/main",
+      );
+      expect(targetMainSha).not.toBeNull();
+
+      const localSha = await runGitChecked(["rev-parse", "HEAD"], {
+        cwd: cloneDir,
+      });
+      expect(targetMainSha).toBe(localSha);
+    });
+
+    // BUG 2: validateProtectedPaths tries to rev-parse refs/remotes/origin/<base_branch>
+    // which doesn't exist on an empty upstream, so the push is incorrectly rejected
+    // even when no protected files are touched.
+    test("clone then push fails with protected paths because base branch does not exist yet", async () => {
+      const repoKey = "owner/empty-upstream-protected";
+      const upstreamPath = await createEmptyUpstreamRepo(
+        "upstream-empty-protected",
+      );
+
+      await configureProxy(ctx, {});
+
+      gitRequestDependencies = {
+        requestReadApproval: async () => ({ type: "allow-forever" }),
+        createRepoConfigOnApproval: () => ({
+          ...createRepoConfig(upstreamPath),
+          allowed_push_branches: ["main"],
+          protected_paths: [".github/**"],
+        }),
+      };
+
+      // Clone first to trigger approval and persist the repo config
+      const cloneDir = join(ctx.tmpDir, "client-empty-protected");
+      const cloneResult = await cloneRepo(
+        ctx.port,
+        `${repoKey}.git`,
+        cloneDir,
+      );
+      expect(cloneResult.success).toBe(true);
+
+      await configureGitIdentity(runGit, cloneDir, E2E_IDENTITY);
+      await commitFile(cloneDir, "README.md", "# hi\n", "first commit");
+
+      const pushResult = await runGit(["push", "-u", "origin", "main"], {
+        cwd: cloneDir,
+      });
+
+      // This SHOULD succeed (no protected files changed), but currently fails
+      // because the base branch ref doesn't exist on an empty upstream.
+      expect(pushResult.success).toBe(false);
+      expect(normalizeOutput(pushResult.stderr, ctx)).toMatchInlineSnapshot(`
+        "remote: 
+        remote: ==================================================        
+        remote: PUSH REJECTED        
+        remote: ==================================================        
+        remote: Base branch main not found; cannot validate protected paths: fatal: Needed a single revision        
+        remote: ==================================================        
+        remote: 
+        To http://localhost:<PORT>/owner/empty-upstream-protected.git
+         ! [remote rejected] main -> main (pre-receive hook declined)
+        error: failed to push some refs to 'http://localhost:<PORT>/owner/empty-upstream-protected.git'
+        "
+      `);
+    });
+  });
 });
